@@ -1941,7 +1941,8 @@ class Server::WorkerService final: public Service,
       DeleteActorsCallback deleteActorsCallback,
       kj::Maybe<kj::String> dockerPathParam,
       kj::Maybe<kj::String> containerEgressInterceptorImageParam,
-      bool isDynamic)
+      bool isDynamic,
+      kj::Maybe<kj::Function<void()>> abortIsolateCallback = kj::none)
       : channelTokenHandler(channelTokenHandler),
         serviceName(serviceName),
         threadContext(threadContext),
@@ -1956,7 +1957,8 @@ class Server::WorkerService final: public Service,
         deleteActorsCallback(kj::mv(deleteActorsCallback)),
         dockerPath(kj::mv(dockerPathParam)),
         containerEgressInterceptorImage(kj::mv(containerEgressInterceptorImageParam)),
-        isDynamic(isDynamic) {}
+        isDynamic(isDynamic),
+        abortIsolateCallback(kj::mv(abortIsolateCallback)) {}
 
   // Call immediately after the constructor to set up `actorNamespaces`. This can't happen during
   // the constructor itself since it sets up cyclic references, which will throw an exception if
@@ -3335,6 +3337,7 @@ class Server::WorkerService final: public Service,
   kj::Maybe<kj::String> dockerPath;
   kj::Maybe<kj::String> containerEgressInterceptorImage;
   bool isDynamic;
+  kj::Maybe<kj::Function<void()>> abortIsolateCallback;
 
   class ActorChannelImpl final: public IoChannelFactory::ActorChannel {
    public:
@@ -3550,6 +3553,28 @@ class Server::WorkerService final: public Service,
 
   void deleteAllActors(kj::Maybe<kj::Exception&> reason) override {
     deleteActorsCallback(reason);
+  }
+
+  // For now, in workerd just abort the process for non-dynamic workers.
+  void abortIsolate(kj::StringPtr reason) noexcept override {
+    KJ_IF_SOME(cb, abortIsolateCallback) {
+      if (reason == nullptr) {
+        KJ_LOG(WARNING, "abortIsolate() called on dynamic worker, terminating isolate");
+      } else {
+        KJ_LOG(WARNING, "abortIsolate() called on dynamic worker, terminating isolate", reason);
+      }
+      // Callback will terminate the isolate and remove worker from the dynamic
+      // isolates map.
+      cb();
+    } else {
+      // Otherwise, abort the process. Throwing from a noexcept function will call
+      // std::terminate, which produces a nicer error message than ::abort().
+      if (reason == nullptr) {
+        KJ_FAIL_REQUIRE("abortIsolate() called, terminating process");
+      } else {
+        KJ_FAIL_REQUIRE("abortIsolate() called, terminating process", reason);
+      }
+    }
   }
 
   kj::Own<WorkerStubChannel> loadIsolate(uint loaderChannel,
@@ -4143,6 +4168,10 @@ struct Server::WorkerDef {
   // If the WorkerDef was created from a DymamicWorkerSource and that
   // source contains a clone of the source bundle, this will take ownership.
   kj::Maybe<kj::Own<void>> maybeOwnedSourceCode;
+
+  // Callback invoked when abortIsolate() is called. Used by dynamic workers to remove
+  // themselves from the loader's isolate map.
+  kj::Maybe<kj::Function<void()>> abortIsolateCallback;
 };
 
 class Server::WorkerLoaderNamespace: public kj::Refcounted {
@@ -4212,7 +4241,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
     WorkerStubImpl(Server& server,
         kj::String isolateName,
         kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource)
-        : startupTask(start(server, kj::mv(isolateName), kj::mv(fetchSource)).fork()) {}
+        : server(server),
+          isolateName(kj::mv(isolateName)),
+          fetchSource(kj::mv(fetchSource)),
+          startupTask(startImpl().fork()) {}
 
     ~WorkerStubImpl() {
       unlink();
@@ -4220,6 +4252,9 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
 
     void unlink() {
       KJ_IF_SOME(s, service) {
+        s->unlink();
+      }
+      KJ_IF_SOME(s, deferredUnlinkService) {
         s->unlink();
       }
     }
@@ -4235,13 +4270,40 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
     }
 
    private:
-    kj::Maybe<kj::Own<WorkerService>> service;  // null if still starting up
+    Server& server;
+    kj::String isolateName;
+    // Retain `fetchSource` so we can reload isolate after abortIsolate()
+    kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource;
+    kj::Maybe<kj::Own<WorkerService>> service;  // null if still starting up or aborted
     kj::ForkedPromise<void> startupTask;        // resolves when `service` is non-null
+    // Service that was superseded by abortIsolate() but cannot be destroyed
+    // synchronously because we're executing within it when abortIsolate() is
+    // called. It is destroyed the next time abortIsolate() is called or when
+    // the service is unlinked.
+    kj::Maybe<kj::Own<WorkerService>> deferredUnlinkService;
 
-    kj::Promise<void> start(Server& server,
-        kj::String isolateName,
-        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) {
+    // Called when abortIsolate() is invoked on this dynamic worker's isolate. Drops the
+    // current service and arranges for the next request to cause a reload via `fetchSource`.
+    void onAbortIsolate() {
+      // We are being called from within the current service's own execution so
+      // we have to keep the current service alive until the current execution
+      // finishes. Transfer ownership to `deferredUnlinkService` (unlinking any
+      // previously-superseded service first) and replace the startup task with
+      // one that performs a fresh load.
+      KJ_IF_SOME(s, deferredUnlinkService) {
+        s->unlink();
+      }
+      deferredUnlinkService = kj::mv(service);
+      service = kj::none;
+      startupTask = startImpl().fork();
+    }
+
+    kj::Promise<void> startImpl() {
       auto source = co_await fetchSource();
+      co_await startWithSource(kj::mv(source));
+    }
+
+    kj::Promise<void> startWithSource(DynamicWorkerSource source) {
       static const kj::HashMap<kj::String, ActorConfig> EMPTY_ACTOR_CONFIGS;
 
       // Rewrite the capabilities in `env` in order to build the I/O channel table.
@@ -4315,6 +4377,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         // ownership issues. For the downstream use, however, we need to be careful
         // to not copy the ownContent if it is an RPC response.
         .maybeOwnedSourceCode = kj::mv(source.ownContent),
+
+        // callback is owned by the isolate which is owned by the service, which
+        // is owned by `this`, so raw pointer is safe.
+        .abortIsolateCallback = kj::Function<void()>([self = this]() { self->onAbortIsolate(); }),
         // clang-format on
       };
 
@@ -4359,14 +4425,20 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
      private:
       kj::Rc<WorkerStubImpl> isolate;
       kj::Maybe<kj::String> entrypointName;
-      Frankenvalue props;  // moved away when `entrypointService` is initialized
+      // `props` is cloned so we can reload if abortIsolate() is called.
+      Frankenvalue props;
 
+      // Pointer to the service backing `entrypointService`. When the underlying service is
+      // recreated (e.g. after abortIsolate()), this pointer changes and we re-fetch.
+      WorkerService* cachedServicePtr = nullptr;
       kj::Maybe<kj::Own<Service>> entrypointService;
 
       kj::Own<WorkerInterface> startRequestImpl(IoChannelFactory::SubrequestMetadata metadata) {
         auto& service = KJ_ASSERT_NONNULL(isolate->service);
-        if (entrypointService == kj::none) {
-          entrypointService = service->getEntrypoint(entrypointName, kj::mv(props));
+        if (cachedServicePtr != service.get()) {
+          // Either first request or service was recreated (e.g., after abortIsolate()).
+          entrypointService = service->getEntrypoint(entrypointName, props.clone());
+          cachedServicePtr = service.get();
         }
         KJ_IF_SOME(ep, entrypointService) {
           // Attach a refcounted reference to `this` (SubrequestChannelImpl) to the returned
@@ -4403,10 +4475,11 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
       }
 
       kj::Maybe<kj::Promise<void>> whenReady() override {
-        if (inner != kj::none) return kj::none;
-
         KJ_IF_SOME(service, isolate->service) {
-          inner = service->getActorClass(entrypointName, kj::mv(props));
+          if (cachedServicePtr != service.get()) {
+            inner = service->getActorClass(entrypointName, props.clone());
+            cachedServicePtr = service.get();
+          }
           return kj::none;
         }
 
@@ -4414,9 +4487,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         // a raw `this` pointer so that the ActorClassImpl stays alive until the startup task
         // resolves, even if the owning object is garbage-collected while waiting.
         return isolate->startupTask.addBranch().then([self = kj::addRef(*this)]() mutable {
-          if (self->inner == kj::none) {
-            self->inner = KJ_ASSERT_NONNULL(self->isolate->service)
-                              ->getActorClass(self->entrypointName, kj::mv(self->props));
+          auto& service = KJ_ASSERT_NONNULL(self->isolate->service);
+          if (self->cachedServicePtr != service.get()) {
+            self->inner = service->getActorClass(self->entrypointName, self->props.clone());
+            self->cachedServicePtr = service.get();
           }
         });
       }
@@ -4442,8 +4516,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
      private:
       kj::Rc<WorkerStubImpl> isolate;
       kj::Maybe<kj::String> entrypointName;
-      Frankenvalue props;  // moved away when `inner` is initialized
+      // `props` is cloned so we can reload if abortIsolate() is called.
+      Frankenvalue props;
 
+      WorkerService* cachedServicePtr = nullptr;
       kj::Maybe<kj::Own<ActorClass>> inner;
 
       ActorClass& getInner() {
@@ -4806,6 +4882,9 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
     { auto drop = kj::mv(ctxExportsHandle); }
   });
 
+  // Extract abortIsolateCallback before moving def into linkCallback lambda
+  auto abortIsolateCallback = kj::mv(def.abortIsolateCallback);
+
   auto linkCallback = [this, def = kj::mv(def), totalActorChannels](WorkerService& workerService,
                           Worker::ValidationErrorReporter& errorReporter) mutable {
     WorkerService::LinkedIoChannels result;
@@ -4959,12 +5038,13 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
   kj::Maybe<kj::StringPtr> serviceName;
   if (!def.isDynamic) serviceName = name;
 
-  auto result = kj::refcounted<WorkerService>(channelTokenHandler, serviceName,
-      globalContext->threadContext, monotonicClock, kj::mv(worker),
-      kj::mv(errorReporter.defaultEntrypoint), kj::mv(errorReporter.namedEntrypoints),
-      kj::mv(errorReporter.actorClasses), kj::mv(linkCallback),
-      KJ_BIND_METHOD(*this, abortAllActors), KJ_BIND_METHOD(*this, deleteAllActors),
-      kj::mv(dockerPath), kj::mv(containerEgressInterceptorImage), def.isDynamic);
+  auto result =
+      kj::refcounted<WorkerService>(channelTokenHandler, serviceName, globalContext->threadContext,
+          monotonicClock, kj::mv(worker), kj::mv(errorReporter.defaultEntrypoint),
+          kj::mv(errorReporter.namedEntrypoints), kj::mv(errorReporter.actorClasses),
+          kj::mv(linkCallback), KJ_BIND_METHOD(*this, abortAllActors),
+          KJ_BIND_METHOD(*this, deleteAllActors), kj::mv(dockerPath),
+          kj::mv(containerEgressInterceptorImage), def.isDynamic, kj::mv(abortIsolateCallback));
   result->initActorNamespaces(def.localActorConfigs, network);
   co_return result;
 }

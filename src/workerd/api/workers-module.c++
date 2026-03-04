@@ -68,4 +68,17 @@ jsg::Optional<jsg::Ref<CacheContext>> EntrypointsModule::getCtxCache(jsg::Lock& 
   return kj::none;
 }
 
+void EntrypointsModule::abortIsolate(jsg::Lock& js, jsg::Optional<kj::String> message) {
+  auto& reason = message.orDefault(nullptr);
+  KJ_IF_SOME(context, IoContext::tryCurrent()) {
+    // In workerd this will abort the current process, in the edge runtime this
+    // will condemn and terminate the current isolate.
+    context.abortIsolate(reason);
+  } else {
+    LOG_NOSENTRY(ERROR, "abortIsolate() called at top level, terminating execution", reason)
+  }
+
+  js.terminateExecutionNow();
+}
+
 }  // namespace workerd::api

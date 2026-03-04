@@ -86,7 +86,11 @@ class EntrypointsModule: public jsg::Object {
   // expose an importable `cache` proxy.
   jsg::Optional<jsg::Ref<CacheContext>> getCtxCache(jsg::Lock& js);
 
-  JSG_RESOURCE_TYPE(EntrypointsModule) {
+  // Immediately condemn and terminate the current isolate. In workerd for now this just aborts the
+  // process.
+  void abortIsolate(jsg::Lock& js, jsg::Optional<kj::String> reason);
+
+  JSG_RESOURCE_TYPE(EntrypointsModule, CompatibilityFlags::Reader flags) {
     JSG_NESTED_TYPE(WorkerEntrypoint);
     JSG_NESTED_TYPE(WorkflowEntrypoint);
     JSG_NESTED_TYPE_NAMED(DurableObjectBase, DurableObject);
@@ -98,6 +102,10 @@ class EntrypointsModule: public jsg::Object {
 
     JSG_METHOD(waitUntil);
     JSG_METHOD(getCtxCache);
+
+    if (flags.getWorkerdExperimental()) {
+      JSG_METHOD(abortIsolate);
+    }
   }
 };
 
