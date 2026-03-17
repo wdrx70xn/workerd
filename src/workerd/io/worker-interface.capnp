@@ -335,6 +335,7 @@ struct AlarmRun @0xfa8ea4e97e23b03d {
 
   retry @1 :Bool;
   retryCountsAgainstLimit @2 :Bool = true;
+  errorDescription @3 :Text;
 }
 
 struct QueueMessage @0x944adb18c0352295 {

@@ -745,8 +745,10 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
     // TODO(someday) If the request responsible for fulfilling this alarm were to be cancelled, then
     // we could probably take over and try to fulfill it ourselves. Maybe we'd want to loop on
     // `actor.getAlarm()`? We'd have to distinguish between rescheduling and request cancellation.
-    auto result = co_await promise;
-    co_return result;
+    auto outcome = co_await promise;
+    co_return AlarmResult{.retry = outcome.retry,
+      .retryCountsAgainstLimit = outcome.retryCountsAgainstLimit,
+      .outcome = outcome.outcome};
   }
 
   // There isn't a pre-existing alarm, we can set event info and call `delivered()` (which emits
@@ -806,9 +808,9 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
         }
 
         // We succeeded, inform any other entrypoints that may be waiting upon us.
-        af.fulfill(result);
+        af.fulfill(result.asOutcome());
         cancellationGuard.cancel();
-        co_return result;
+        co_return kj::mv(result);
       } catch (const kj::Exception& e) {
         // We failed, inform any other entrypoints that may be waiting upon us.
         af.reject(e);
@@ -816,9 +818,11 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
         throw;
       }
     }
-    KJ_CASE_ONEOF(result, WorkerInterface::AlarmResult) {
+    KJ_CASE_ONEOF(outcome, WorkerInterface::AlarmResultWithException) {
       // The alarm was cancelled while we were waiting to run, go ahead and return the result.
-      co_return result;
+      co_return AlarmResult{.retry = outcome.retry,
+        .retryCountsAgainstLimit = outcome.retryCountsAgainstLimit,
+        .outcome = outcome.outcome};
     }
   }
 

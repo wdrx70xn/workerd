@@ -585,12 +585,14 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
         }
         return WorkerInterface::AlarmResult{.retry = true,
           .retryCountsAgainstLimit = shouldRetryCountsAgainstLimits,
-          .outcome = outcome};
+          .outcome = outcome,
+          .errorDescription = kj::str(description)};
       })
           .then([&context](WorkerInterface::AlarmResult result)
                     -> kj::Promise<WorkerInterface::AlarmResult> {
-        return context.waitForOutputLocks().then(
-            [result]() { return kj::mv(result); }, [&context](kj::Exception&& e) {
+        return context.waitForOutputLocks().then([result = kj::mv(result)]() mutable {
+          return kj::mv(result);
+        }, [&context](kj::Exception&& e) {
           auto& actor = KJ_ASSERT_NONNULL(context.getActor());
           kj::String actorId;
           KJ_SWITCH_ONEOF(actor.getId()) {
@@ -620,7 +622,8 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
           }
           return WorkerInterface::AlarmResult{.retry = true,
             .retryCountsAgainstLimit = shouldRetryCountsAgainstLimits,
-            .outcome = EventOutcome::EXCEPTION};
+            .outcome = EventOutcome::EXCEPTION,
+            .errorDescription = kj::str(e.getDescription())};
         });
       });
     }
