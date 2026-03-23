@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Cloudflare, Inc.
+// Copyright (c) 2026 Cloudflare, Inc.
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
@@ -31,12 +31,28 @@ interface StepRpcStub {
   waitForEvent(...args: unknown[]): Promise<unknown>;
 }
 
-// StepPromise is a deferred thenable that captures .rollback() synchronously before firing
-// the actual RPC. This is necessary because step.do() returns an RPC promise -- accessing
-// .rollback() on it after resolution would be interpreted as a pipelined RPC call on the
-// resolved value. By deferring execution until .then(), we can bundle the callback and rollback
-// function in a single RPC call.
-class StepPromise {
+// The wrapped step interface returned by wrapStep(). Matches StepRpcStub but do() and
+// waitForEvent() return StepPromise instead of plain Promise.
+interface WrappedStep {
+  do(
+    name: string,
+    configOrCallback: unknown,
+    maybeCallback?: unknown
+  ): StepPromise;
+  sleep(name: string, duration: unknown): Promise<void>;
+  sleepUntil(name: string, timestamp: unknown): Promise<void>;
+  waitForEvent(name: string, options: unknown): StepPromise;
+}
+
+// StepPromise is a real Promise subclass that captures .rollback() synchronously before
+// firing the actual RPC. This is necessary because step.do() returns an RPC promise --
+// accessing .rollback() on it after resolution would be interpreted as a pipelined RPC call
+// on the resolved value. By deferring execution until .then(), we can bundle the callback
+// and rollback function in a single RPC call.
+//
+// We extend Promise so that instanceof Promise is true and the d.ts declaration
+// (StepPromise<T> extends Promise<T>) is accurate at runtime.
+class StepPromise extends Promise<unknown> {
   #execute: ExecuteFn | null;
   #rollbackFn: RollbackFn = null;
   #rollbackConfig: RollbackConfig = null;
@@ -44,18 +60,26 @@ class StepPromise {
   #promise: Promise<unknown> | null = null;
   #launched = false;
 
-  get [Symbol.toStringTag](): string {
-    return 'StepPromise';
+  // Tell the engine to construct plain Promises (not StepPromise) for internal
+  // operations like finally(). Without this, finally() would try to construct a
+  // StepPromise using the standard (resolve, reject) executor contract, which
+  // our constructor does not implement.
+  static override get [Symbol.species](): PromiseConstructor {
+    return Promise;
   }
 
   constructor(execute: ExecuteFn) {
+    // No-op executor — the real work is deferred until .then() is called.
+    // This is required by the Promise constructor but we never use the
+    // resolve/reject it provides; instead we delegate to #getPromise().
+    super(() => {});
     this.#execute = execute;
   }
 
   rollback(
     configOrFn: RollbackConfig | RollbackFn,
     maybeFn?: RollbackFn
-  ): StepPromise {
+  ): this {
     if (this.#launched) {
       throw new Error('.rollback() must be called before the step is awaited');
     }
@@ -101,25 +125,24 @@ class StepPromise {
     return this.#promise;
   }
 
-  then(
-    onFulfilled?: ((value: unknown) => unknown) | null,
-    onRejected?: ((reason: unknown) => unknown) | null
-  ): Promise<unknown> {
+  // Override then() to delegate to the deferred promise rather than the no-op
+  // super promise. This is what makes the lazy execution work. catch() delegates
+  // through then() per the ES spec; finally() uses Symbol.species (set above)
+  // to construct a plain Promise instead of a StepPromise.
+  //
+  // The generic signature matches Promise.prototype.then from lib.es5.d.ts —
+  // TypeScript requires it for a compatible override.
+  override then<TResult1 = unknown, TResult2 = never>(
+    onFulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
+    onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+  ): Promise<TResult1 | TResult2> {
     return this.#getPromise().then(onFulfilled, onRejected);
-  }
-
-  catch(onRejected?: ((reason: unknown) => unknown) | null): Promise<unknown> {
-    return this.#getPromise().catch(onRejected);
-  }
-
-  finally(onFinally?: (() => void) | null): Promise<unknown> {
-    return this.#getPromise().finally(onFinally);
   }
 }
 
 // Wraps the step RPC stub so that step.do() and step.waitForEvent() return StepPromise instances.
 // sleep() and sleepUntil() are passed through unchanged (they return Promise<void>, no rollback).
-function wrapStep(jsStep: StepRpcStub): unknown {
+function wrapStep(jsStep: StepRpcStub): WrappedStep {
   return {
     do(
       name: string,
@@ -128,8 +151,6 @@ function wrapStep(jsStep: StepRpcStub): unknown {
     ): StepPromise {
       return new StepPromise(
         (rollbackFn: RollbackFn, rollbackConfig: RollbackConfig) => {
-          // Build the args for the underlying RPC call.
-          // Engine signature: do(name, configOrCallback, callback?, rollbackFn?, rollbackConfig?)
           const args: unknown[] = [name];
           if (maybeCallback !== undefined) {
             // do(name, config, callback) form
@@ -138,9 +159,9 @@ function wrapStep(jsStep: StepRpcStub): unknown {
             // do(name, callback) form
             args.push(configOrCallback);
           }
-          if (rollbackFn) {
+          if (rollbackFn !== null) {
             args.push(rollbackFn);
-            if (rollbackConfig) {
+            if (rollbackConfig !== null) {
               args.push(rollbackConfig);
             }
           }
@@ -160,11 +181,10 @@ function wrapStep(jsStep: StepRpcStub): unknown {
     waitForEvent(name: string, options: unknown): StepPromise {
       return new StepPromise(
         (rollbackFn: RollbackFn, rollbackConfig: RollbackConfig) => {
-          // Engine signature: waitForEvent(name, options, rollbackFn?, rollbackConfig?)
           const args: unknown[] = [name, options];
-          if (rollbackFn) {
+          if (rollbackFn !== null) {
             args.push(rollbackFn);
-            if (rollbackConfig) {
+            if (rollbackConfig !== null) {
               args.push(rollbackConfig);
             }
           }
@@ -174,21 +194,6 @@ function wrapStep(jsStep: StepRpcStub): unknown {
     },
   };
 }
-
-// Wrap WorkflowEntrypoint to intercept run() calls and wrap the step argument before it reaches
-// user code. This provides an extension point for step-level features (rollback, future additions)
-// without modifying the C++ entrypoint.
-//
-// We use a JS subclass (not a Proxy) because the runtime walks the constructor prototype chain
-// to classify entrypoints (workflowClasses vs actorClasses vs statelessClasses). A Proxy breaks
-// identity comparison: `Proxy !== target`. A JS subclass preserves the chain:
-//   UserWorkflow -> our JS class -> C++ WorkflowEntrypoint (matched by runtime)
-const BaseWorkflowEntrypoint =
-  entrypoints.WorkflowEntrypoint as unknown as new (
-    ...args: unknown[]
-  ) => Record<string, unknown>;
-
-const kStepWrapped = Symbol('stepWrapped');
 
 // Wraps a run function so that its second argument (step) is replaced with wrapStep(step).
 function makeWrappedRun(
@@ -209,23 +214,31 @@ function makeWrappedRun(
   };
 }
 
-class WorkflowEntrypointWrapper extends BaseWorkflowEntrypoint {
-  constructor(...args: unknown[]) {
-    super(...args);
+// Wrap WorkflowEntrypoint to intercept run() calls and wrap the step argument before it reaches
+// user code. This provides an extension point for step-level features (rollback, future additions)
+// without modifying the C++ entrypoint.
+//
+// We use a JS subclass (not a Proxy) because the runtime walks the constructor prototype chain
+// to classify entrypoints (workflowClasses vs actorClasses vs statelessClasses). A Proxy breaks
+// identity comparison: `Proxy !== target`. A JS subclass preserves the chain:
+//   UserWorkflow -> our JS class -> C++ WorkflowEntrypoint (matched by runtime)
+// Tracks which prototypes have already had their run() wrapped, so we don't
+// double-wrap on the second instantiation of the same class.
+const wrappedProtos = new WeakSet<object>();
+
+class WorkflowEntrypointWrapper extends entrypoints.WorkflowEntrypoint {
+  constructor(ctx: unknown, env: unknown) {
+    super(ctx, env);
 
     // Patch the run method on the subclass prototype if it defines its own run and hasn't been
     // patched yet. We use hasOwnProperty to avoid double-wrapping when a subclass inherits run
     // from a parent that was already patched (e.g. class B extends A extends WorkflowEntrypoint
     // where only A defines run).
-    const proto = Object.getPrototypeOf(this) as Record<
-      string | symbol,
-      unknown
-    >;
+    const proto = Object.getPrototypeOf(this) as Record<string, unknown>;
     if (
-      proto &&
+      !wrappedProtos.has(proto) &&
       Object.prototype.hasOwnProperty.call(proto, 'run') &&
-      typeof proto.run === 'function' &&
-      !proto[kStepWrapped]
+      typeof proto.run === 'function'
     ) {
       const originalRun = proto.run as (
         event: unknown,
@@ -233,7 +246,7 @@ class WorkflowEntrypointWrapper extends BaseWorkflowEntrypoint {
         ...rest: unknown[]
       ) => unknown;
       proto.run = makeWrappedRun(originalRun);
-      proto[kStepWrapped] = true;
+      wrappedProtos.add(proto);
     }
 
     // NOTE: Arrow function class properties (e.g. `run = async () => {}`) are NOT supported.
@@ -244,7 +257,11 @@ class WorkflowEntrypointWrapper extends BaseWorkflowEntrypoint {
   }
 }
 
-export const WorkflowEntrypoint = WorkflowEntrypointWrapper;
+export const WorkflowEntrypoint = Cloudflare.compatibilityFlags[
+  'workflows_step_rollback'
+]
+  ? WorkflowEntrypointWrapper
+  : entrypoints.WorkflowEntrypoint;
 
 export function withEnv(newEnv: unknown, fn: () => unknown): unknown {
   return innerEnv.withEnv(newEnv, fn);
