@@ -230,23 +230,31 @@ class WorkflowEntrypointWrapper extends entrypoints.WorkflowEntrypoint {
   constructor(ctx: unknown, env: unknown) {
     super(ctx, env);
 
-    // Patch the run method on the subclass prototype if it defines its own run and hasn't been
-    // patched yet. We use hasOwnProperty to avoid double-wrapping when a subclass inherits run
-    // from a parent that was already patched (e.g. class B extends A extends WorkflowEntrypoint
-    // where only A defines run).
-    const proto = Object.getPrototypeOf(this) as Record<string, unknown>;
-    if (
-      !wrappedProtos.has(proto) &&
-      Object.prototype.hasOwnProperty.call(proto, 'run') &&
-      typeof proto.run === 'function'
-    ) {
-      const originalRun = proto.run as (
-        event: unknown,
-        step: unknown,
-        ...rest: unknown[]
-      ) => unknown;
-      proto.run = makeWrappedRun(originalRun);
-      wrappedProtos.add(proto);
+    // Walk the prototype chain to find the prototype that owns run() and wrap it.
+    // We stop at WorkflowEntrypointWrapper.prototype to avoid patching the C++ base.
+    // This handles inheritance: class B extends A extends WorkflowEntrypoint where
+    // only A defines run() — getPrototypeOf(b) is B.prototype which doesn't own run,
+    // so we walk up to A.prototype which does.
+    let proto: Record<string, unknown> | null = Object.getPrototypeOf(
+      this
+    ) as Record<string, unknown>;
+    const stop = WorkflowEntrypointWrapper.prototype as unknown;
+    while (proto !== null && proto !== stop) {
+      if (
+        !wrappedProtos.has(proto) &&
+        Object.prototype.hasOwnProperty.call(proto, 'run') &&
+        typeof proto.run === 'function'
+      ) {
+        const originalRun = proto.run as (
+          event: unknown,
+          step: unknown,
+          ...rest: unknown[]
+        ) => unknown;
+        proto.run = makeWrappedRun(originalRun);
+        wrappedProtos.add(proto);
+        break;
+      }
+      proto = Object.getPrototypeOf(proto) as Record<string, unknown> | null;
     }
 
     // NOTE: Arrow function class properties (e.g. `run = async () => {}`) are NOT supported.

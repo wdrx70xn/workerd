@@ -96,3 +96,15 @@ export class RollbackCallableWorkflow extends WorkflowEntrypoint {
     return { value };
   }
 }
+
+// Used by the flag-disabled regression test. Without workflows_step_rollback,
+// step is the raw RPC stub — no wrapping, no .rollback().
+export class BasicWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    const doResult = await step.do('my-step', async () => 'hello');
+    await step.sleep('s1', '10 seconds');
+    await step.sleepUntil('s2', new Date('2025-01-01'));
+    await step.waitForEvent('w1', { type: 'approval' });
+    return { doResult, slept: true, waited: true };
+  }
+}
