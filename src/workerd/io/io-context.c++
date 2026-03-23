@@ -1108,9 +1108,16 @@ SpanParent IoContext::getCurrentTraceSpan() {
 }
 
 SpanParent IoContext::getCurrentUserTraceSpan() {
-  // If called while the JS lock is held, try to use the user trace span stored in the async
-  // context frame.  This allows startActiveSpan() to push a new span into the frame so that
-  // subsequent makeUserTraceSpan() calls automatically nest correctly.
+  // Every caller of makeUserTraceSpan() is a JSG binding method, so the JS lock is always
+  // held when a child span is being created.  The frame therefore always contains the value
+  // written by makeAsyncTraceScope() (or a deeper value written by enterContext()), which is
+  // exactly the parent the new child span should inherit from.
+  //
+  // A user-visible child span only makes sense in the context of user JS execution — it
+  // reflects what the user's code is doing.  If there is no JS lock there is no async context
+  // frame and no meaningful "current user span" to inherit from, so falling back to the root
+  // IncomingRequest span is the correct behaviour: anything that happens outside JS execution
+  // belongs at the root level.
   KJ_IF_SOME(lock, currentLock) {
     KJ_IF_SOME(frame, jsg::AsyncContextFrame::current(lock)) {
       KJ_IF_SOME(value, frame.get(lock.getUserTraceAsyncContextKey())) {
@@ -1122,8 +1129,7 @@ SpanParent IoContext::getCurrentUserTraceSpan() {
     }
   }
 
-  // Fall back to the flat IncomingRequest-level span when the async context is unavailable
-  // (e.g. at startup, or when no JS lock is held).
+  // No JS lock — fall back to the flat IncomingRequest-level root span.
   if (incomingRequests.empty()) {
     return SpanParent(nullptr);
   } else {
