@@ -1075,12 +1075,14 @@ IoContext::TraceScope IoContext::makeAsyncTraceScope(
       js, lock.getTraceAsyncContextKey(), js.v8Ref(spanHandle));
 
   // Note: we intentionally do NOT seed userTraceAsyncContextKey here.
-  // The TS OTel enterContext() call is responsible for pushing the user-facing SpanParent
-  // into the frame when the user starts an active span.  Seeding it here would extend the
-  // SequentialSpanSubmitter → WorkerTracer ownership chain beyond the IncomingRequest
-  // lifetime (the IoOwn<SpanParent> lives on the V8 heap until GC), which would delay
-  // WorkerTracer destruction and therefore delay the outcome tail-stream event — breaking
-  // Durable Object actor requests where the IoContext persists across many requests.
+  // The TS OTel enterContext() call (Phase 0b) is responsible for pushing the user-facing
+  // SpanParent into the frame when the user starts an active span via startActiveSpan().
+  // Creating a second AsyncContextFrame::StorageScope here to pre-seed the root user span
+  // causes a null Own<> dereference in the tail-worker streaming event pipeline; the exact
+  // mechanism is unclear but it reproduces even with a completely inert SpanParent(nullptr),
+  // so it is not related to the WorkerTracer ownership chain.  Deferring to enterContext()
+  // avoids the issue entirely, and is the correct design: the frame should only contain a
+  // user span when the user has explicitly started one.
 
   return TraceScope{kj::mv(internalScope)};
 }

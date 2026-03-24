@@ -870,11 +870,11 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   // as a direct struct member that is move-constructed.
   //
   // Note: the user-facing SpanParent (userTraceAsyncContextKey) is intentionally NOT seeded
-  // here.  That seeding is enterContext()'s job: the TS OTel layer calls enterContext() when
-  // the user starts an active span, at which point both the user span and (later) the OTel
-  // Context object are pushed into the frame together.  Seeding the root span here would keep
-  // the SequentialSpanSubmitter → WorkerTracer ownership chain alive beyond the IncomingRequest
-  // lifetime (via the IoOwn<SpanParent> on the V8 heap), delaying outcome event emission.
+  // here.  That seeding is enterContext()'s job (Phase 0b): the TS OTel layer calls
+  // enterContext() when the user starts an active span, at which point the user span is
+  // pushed into the frame.  Creating a second StorageScope here to pre-seed the root user
+  // span causes a null Own<> crash in the tail-worker streaming pipeline; deferring to
+  // enterContext() avoids the issue and is the correct design.
   struct TraceScope {
     kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope;
     explicit TraceScope(kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope)
