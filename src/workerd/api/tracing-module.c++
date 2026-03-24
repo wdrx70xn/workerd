@@ -32,7 +32,7 @@ void JsSpan::setAttribute(
   }
 }
 
-SpanParent JsSpan::getUserSpanParent() {
+SpanParent JsSpan::getSpanParent() {
   KJ_IF_SOME(s, span) {
     return s->getUserSpanParent();
   }
@@ -91,7 +91,7 @@ jsg::Ref<ContextScope> TracingModule::enterContext(
   // This allows makeUserTraceSpan() to pick up the correct parent for nested spans.
   SpanParent userSpanParent = [&]() -> SpanParent {
     KJ_IF_SOME(spanRef, nativeSpan) {
-      return spanRef->getUserSpanParent();
+      return spanRef->getSpanParent();
     }
     // No span provided — preserve the current user trace parent unchanged.
     return ioContext.getCurrentUserTraceSpan();

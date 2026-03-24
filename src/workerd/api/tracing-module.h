@@ -30,7 +30,7 @@ class JsSpan: public jsg::Object {
   // Returns a SpanParent for this span, for use by TracingModule::enterContext() when
   // pushing it into the async context frame.  Returns a no-op nullptr parent if the
   // span has already ended.
-  SpanParent getUserSpanParent();
+  SpanParent getSpanParent();
 
   JSG_RESOURCE_TYPE(JsSpan) {
     JSG_METHOD(end);
