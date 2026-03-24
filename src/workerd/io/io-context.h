@@ -861,30 +861,29 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   // Get an HttpClient to use for Cache API subrequests.
   kj::Own<CacheClient> getCacheClient();
 
-  // RAII handle returned by makeAsyncTraceScope().  Holds two AsyncContextFrame::StorageScope
-  // objects: one for the internal trace SpanParent and one for the user-facing SpanParent.
-  // Both scopes must remain alive for context propagation to work correctly.
+  // RAII handle returned by makeAsyncTraceScope().  Holds an AsyncContextFrame::StorageScope
+  // for the internal trace SpanParent.  The scope must remain alive for context propagation
+  // to work correctly.
   //
-  // The scopes are heap-allocated (via kj::Own) because AsyncContextFrame::StorageScope is
-  // non-movable (KJ_DISALLOW_COPY inhibits implicit move generation), so they cannot be stored
-  // as direct struct members that are move-constructed.
+  // The scope is heap-allocated (via kj::Own) because AsyncContextFrame::StorageScope is
+  // non-movable (KJ_DISALLOW_COPY inhibits implicit move generation), so it cannot be stored
+  // as a direct struct member that is move-constructed.
   //
-  // Destruction order: userScope first (inner), then internalScope (outer) — restoring the
-  // async context frame stack in LIFO order. Achieved by declaring internalScope first and
-  // userScope second (C++ destroys members in reverse declaration order).
+  // Note: the user-facing SpanParent (userTraceAsyncContextKey) is intentionally NOT seeded
+  // here.  That seeding is enterContext()'s job: the TS OTel layer calls enterContext() when
+  // the user starts an active span, at which point both the user span and (later) the OTel
+  // Context object are pushed into the frame together.  Seeding the root span here would keep
+  // the SequentialSpanSubmitter → WorkerTracer ownership chain alive beyond the IncomingRequest
+  // lifetime (via the IoOwn<SpanParent> on the V8 heap), delaying outcome event emission.
   struct TraceScope {
     kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope;
-    kj::Own<jsg::AsyncContextFrame::StorageScope> userScope;
-    TraceScope(kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope,
-        kj::Own<jsg::AsyncContextFrame::StorageScope> userScope)
-        : internalScope(kj::mv(internalScope)), userScope(kj::mv(userScope)) {}
+    explicit TraceScope(kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope)
+        : internalScope(kj::mv(internalScope)) {}
     KJ_DISALLOW_COPY(TraceScope);
   };
 
   // Returns an object that ensures an async JS operation started in the current scope captures the
   // given trace span, or the current request's trace span, if no span is given.
-  // Also seeds the user-facing SpanParent into the async context frame so that user spans
-  // (created via makeUserTraceSpan) automatically nest correctly under startActiveSpan().
   TraceScope makeAsyncTraceScope(
       Worker::Lock& lock, kj::Maybe<SpanParent> spanParent = kj::none) KJ_WARN_UNUSED_RESULT;
 
