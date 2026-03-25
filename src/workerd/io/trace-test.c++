@@ -521,8 +521,8 @@ KJ_TEST("Onset preserves SpanKind through serialization and clone") {
   FetchEventInfo fetchInfo(
       kj::HttpMethod::GET, kj::str("https://example.com"), kj::str("{}"), nullptr);
 
-  Onset info(staticSpanId, Onset::Info(kj::mv(fetchInfo)), {.scriptName = kj::str("foo")},
-      nullptr, SpanKind::SERVER);
+  Onset info(staticSpanId, Onset::Info(kj::mv(fetchInfo)), {.scriptName = kj::str("foo")}, nullptr,
+      SpanKind::SERVER);
   KJ_ASSERT(info.spanKind == SpanKind::SERVER);
   info.copyTo(infoBuilder);
 
