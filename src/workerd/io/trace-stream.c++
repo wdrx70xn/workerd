@@ -465,6 +465,9 @@ jsg::JsValue ToJs(jsg::Lock& js, const SpanOpen& spanOpen, StringCache& cache) {
       }
     }
   }
+
+  obj.set(js, SPANKIND_STR, cache.get(js, spanKindToString(spanOpen.spanKind)));
+
   return obj;
 }
 
