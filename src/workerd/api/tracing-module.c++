@@ -6,19 +6,13 @@
 
 namespace workerd::api {
 
-JsSpan::JsSpan(kj::Maybe<IoOwn<TraceContext>> span,
-    kj::Maybe<kj::Own<jsg::AsyncContextFrame::StorageScope>> userScope)
-    : span(kj::mv(span)),
-      userScope(kj::mv(userScope)) {}
+JsSpan::JsSpan(kj::Maybe<IoOwn<TraceContext>> span): span(kj::mv(span)) {}
 
 JsSpan::~JsSpan() noexcept(false) {
   end();
 }
 
 void JsSpan::end() {
-  // Destroy the scope first to restore the frame, then close the span.
-  // (Also the natural order if both are kj::none already — no-op.)
-  userScope = kj::none;
   span = kj::none;
 }
 
@@ -36,16 +30,36 @@ void JsSpan::setAttribute(
 jsg::Ref<JsSpan> TracingModule::startSpan(jsg::Lock& js, kj::String name) {
   KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
     TraceContext traceContext = ioContext.makeUserTraceSpan(kj::ConstString(kj::mv(name)));
+    auto ownedSpan = ioContext.addObject(kj::heap(kj::mv(traceContext)));
+    return js.alloc<JsSpan>(kj::mv(ownedSpan));
+  } else {
+    return js.alloc<JsSpan>(kj::none);
+  }
+}
 
-    // Push this span's user SpanParent into the async context frame so that child spans
-    // created while this span is active will inherit it as their parent.
-    auto userScope = ioContext.pushUserTraceSpan(js, traceContext.getUserSpanParent());
+jsg::Value TracingModule::startActiveSpan(
+    jsg::Lock& js, kj::String name, jsg::Function<jsg::Value(jsg::Ref<JsSpan>)> fn) {
+  KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
+    TraceContext traceContext = ioContext.makeUserTraceSpan(kj::ConstString(kj::mv(name)));
+
+    // getUserSpanParent() must be called BEFORE traceContext is moved, as it addRef()s the
+    // observer from the still-live SpanBuilder.
+    auto userSpanParent = traceContext.getUserSpanParent();
 
     auto ownedSpan = ioContext.addObject(kj::heap(kj::mv(traceContext)));
-    return js.alloc<JsSpan>(kj::mv(ownedSpan), kj::mv(userScope));
+    auto jsSpan = js.alloc<JsSpan>(kj::mv(ownedSpan));
+
+    // Push the span's user SpanParent into the async context frame.  The StorageScope lives
+    // on the C++ stack, guaranteeing LIFO destruction.  V8's continuation-preserved embedder
+    // data captures the frame at await points, so async continuations inside fn() also see
+    // the correct parent even after this scope is destroyed.
+    auto userScope = ioContext.pushUserTraceSpan(js, kj::mv(userSpanParent));
+
+    return fn(js, kj::mv(jsSpan));
+    // userScope destroyed here by RAII — frame restored to previous value.
   } else {
-    // When no IoContext is available, create a no-op span
-    return js.alloc<JsSpan>(kj::none, kj::none);
+    auto noopSpan = js.alloc<JsSpan>(kj::none);
+    return fn(js, kj::mv(noopSpan));
   }
 }
 

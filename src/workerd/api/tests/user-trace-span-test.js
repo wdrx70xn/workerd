@@ -26,10 +26,11 @@ export default {
     if (url.pathname === '/nested-spans') {
       const { withSpan } = env.tracing;
 
-      // Create an explicit user span via withSpan.  While this span is open, make a fetch
-      // subrequest — the fetch internally calls makeUserTraceSpan("fetch") which calls
-      // getCurrentUserTraceSpan().  Since enterContext() isn't implemented yet, the fetch
-      // span will be a sibling of the outer span, not a child of it.
+      // Create an explicit user span via withSpan (which uses startActiveSpan internally).
+      // While this span is active, make a fetch subrequest — the fetch internally calls
+      // makeUserTraceSpan("fetch") which calls getCurrentUserTraceSpan().  Because
+      // startActiveSpan pushed the user span into the async context frame, the fetch span
+      // will be a CHILD of outer-op.
       const result = await withSpan('outer-op', async (span) => {
         span.setAttribute('test', 'nesting');
 

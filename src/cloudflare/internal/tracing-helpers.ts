@@ -36,23 +36,29 @@ export function withSpan<T>(
   name: string,
   fn: (span: ReturnType<typeof tracing.startSpan>) => T
 ): T {
-  const span = tracing.startSpan(name);
+  // Use startActiveSpan to push the span into the async context frame for the duration
+  // of fn.  This ensures that child spans created inside fn (e.g. from fetch subrequests)
+  // automatically inherit this span as their parent.  The StorageScope that seeds the
+  // frame lives on the C++ stack inside startActiveSpan, guaranteeing LIFO destruction.
+  // V8's continuation-preserved embedder data captures the frame at await points, so
+  // async continuations inside fn also see the correct parent.
+  return tracing.startActiveSpan(name, (span) => {
+    try {
+      const result = fn(span);
 
-  try {
-    const result = fn(span);
+      // Handle async results - ensure span ends after completion
+      if (result instanceof Promise) {
+        return Promise.resolve(result).finally(() => {
+          span.end();
+        }) as T;
+      }
 
-    // Handle async results - ensure span ends after completion
-    if (result instanceof Promise) {
-      return Promise.resolve(result).finally(() => {
-        span.end();
-      }) as T;
+      // Synchronous result - end span immediately
+      span.end();
+      return result;
+    } catch (error) {
+      span.end();
+      throw error;
     }
-
-    // Synchronous result - end span immediately
-    span.end();
-    return result;
-  } catch (error) {
-    span.end();
-    throw error;
-  }
+  });
 }

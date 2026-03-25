@@ -870,11 +870,11 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   // as a direct struct member that is move-constructed.
   //
   // Note: the user-facing SpanParent (userTraceAsyncContextKey) is intentionally NOT seeded
-  // here.  That seeding is enterContext()'s job (Phase 0b): the TS OTel layer calls
-  // enterContext() when the user starts an active span, at which point the user span is
-  // pushed into the frame.  Creating a second StorageScope here to pre-seed the root user
-  // span causes a null Own<> crash in the tail-worker streaming pipeline; deferring to
-  // enterContext() avoids the issue and is the correct design.
+  // here.  User spans are pushed into the frame by startActiveSpan() via pushUserTraceSpan(),
+  // using a stack-scoped StorageScope that guarantees LIFO destruction.  Creating a second
+  // StorageScope here to pre-seed the root user span causes a null Own<> crash in the
+  // tail-worker streaming pipeline; the frame should only contain a user span when the user
+  // has explicitly started an active one.
   struct TraceScope {
     kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope;
     explicit TraceScope(kj::Own<jsg::AsyncContextFrame::StorageScope> internalScope)
@@ -894,7 +894,10 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
 
   // Pushes the given user SpanParent into userTraceAsyncContextKey in the current async context
   // frame.  Returns a heap-allocated StorageScope that restores the previous value when destroyed.
-  // This is used by startSpan() to make nested user spans visible to getCurrentUserTraceSpan().
+  // The caller MUST ensure the returned scope is destroyed in LIFO order (stack-scoped).
+  // Storing the scope in a heap-allocated / GC-managed object would break the Scope push/pop
+  // invariant and corrupt the async context frame stack.
+  // Used by startActiveSpan() to make nested user spans visible to getCurrentUserTraceSpan().
   kj::Own<jsg::AsyncContextFrame::StorageScope> pushUserTraceSpan(
       jsg::Lock& js, SpanParent userSpan);
 

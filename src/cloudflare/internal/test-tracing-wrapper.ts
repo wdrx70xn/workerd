@@ -8,15 +8,19 @@
 // but it should never be used outside of test configurations.
 
 import { withSpan } from 'cloudflare-internal:tracing-helpers';
+import tracing from 'cloudflare-internal:tracing';
 
 interface TestWrapper {
   withSpan: typeof withSpan;
+  startSpan: typeof tracing.startSpan;
+  startActiveSpan: typeof tracing.startActiveSpan;
 }
 
 // Wrapper function that provides test utilities for tracing
 export default function (_env: unknown): TestWrapper {
   return {
-    // Export withSpan for testing
     withSpan,
+    startSpan: tracing.startSpan.bind(tracing),
+    startActiveSpan: tracing.startActiveSpan.bind(tracing),
   };
 }

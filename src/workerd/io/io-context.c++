@@ -1075,14 +1075,12 @@ IoContext::TraceScope IoContext::makeAsyncTraceScope(
       js, lock.getTraceAsyncContextKey(), js.v8Ref(spanHandle));
 
   // Note: we intentionally do NOT seed userTraceAsyncContextKey here.
-  // The TS OTel enterContext() call (Phase 0b) is responsible for pushing the user-facing
-  // SpanParent into the frame when the user starts an active span via startActiveSpan().
-  // Creating a second AsyncContextFrame::StorageScope here to pre-seed the root user span
-  // causes a null Own<> dereference in the tail-worker streaming event pipeline; the exact
-  // mechanism is unclear but it reproduces even with a completely inert SpanParent(nullptr),
-  // so it is not related to the WorkerTracer ownership chain.  Deferring to enterContext()
-  // avoids the issue entirely, and is the correct design: the frame should only contain a
-  // user span when the user has explicitly started one.
+  // User spans are pushed into the frame by startActiveSpan() / pushUserTraceSpan(), which
+  // use a stack-scoped StorageScope to guarantee LIFO destruction.  Creating a second
+  // StorageScope here to pre-seed the root user span causes a null Own<> dereference in the
+  // tail-worker streaming event pipeline (reproduces even with SpanParent(nullptr), so the
+  // cause is the dual-scope creation itself, not the ownership chain).  The frame should
+  // only contain a user span when the user has explicitly started an active one.
 
   return TraceScope{kj::mv(internalScope)};
 }
@@ -1115,20 +1113,21 @@ SpanParent IoContext::getCurrentTraceSpan() {
 }
 
 SpanParent IoContext::getCurrentUserTraceSpan() {
-  // When the TS OTel layer calls enterContext() (e.g. inside startActiveSpan()), it pushes
-  // the active user span into the async context frame under userTraceAsyncContextKey.
-  // Subsequent calls to makeUserTraceSpan() — which is a JSG binding method running under the
-  // JS lock — will find that value here and use it as the parent for any new child span.
+  // startActiveSpan() pushes the active user span into the async context frame under
+  // userTraceAsyncContextKey (via pushUserTraceSpan()).  Subsequent calls to
+  // makeUserTraceSpan() — which are JSG binding methods running under the JS lock — will
+  // find that value here and use it as the parent for any new child span, giving proper
+  // span nesting.
   //
-  // If enterContext() has not yet been called (i.e. the user has not started any active OTel
-  // span), the key will not be present in the frame and we fall through to the flat
-  // IncomingRequest-level root span, which is the correct fallback for unannotated code.
+  // If startActiveSpan() has not been called (i.e. no user span is active), the key will
+  // not be present in the frame and we fall through to the flat IncomingRequest-level root
+  // span, which is the correct fallback for unannotated code.
   //
   // A user-visible child span only makes sense in the context of user JS execution — it
-  // reflects what the user's code is doing.  If there is no JS lock there is no async context
-  // frame and no meaningful "current user span" to inherit from, so falling back to the root
-  // IncomingRequest span is the correct behaviour: anything that happens outside JS execution
-  // belongs at the root level.
+  // reflects what the user's code is doing.  If there is no JS lock there is no async
+  // context frame and no meaningful "current user span" to inherit from, so falling back
+  // to the root IncomingRequest span is the correct behaviour: anything that happens
+  // outside JS execution belongs at the root level.
   KJ_IF_SOME(lock, currentLock) {
     KJ_IF_SOME(frame, jsg::AsyncContextFrame::current(lock)) {
       KJ_IF_SOME(value, frame.get(lock.getUserTraceAsyncContextKey())) {

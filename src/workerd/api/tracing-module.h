@@ -10,15 +10,13 @@ namespace workerd::api {
 
 // JavaScript-accessible span class that manages span ownership through IoContext.
 //
-// When a JsSpan is created, it pushes its user-facing SpanParent into the async context
-// frame (via userTraceAsyncContextKey).  Any child spans created while this span is active
-// will pick up the pushed value as their parent via getCurrentUserTraceSpan(), giving
-// proper span nesting.  When end() is called (or the destructor runs), the frame is
-// restored to its previous value.
+// startSpan() creates a JsSpan but does NOT push it into the async context frame.  This
+// matches the OTel tracer.startSpan() semantics where a span is created but not made
+// "active" in the current context.  Span nesting via the async context frame requires a
+// LIFO-safe scope (like withSpan / startActiveSpan); see IoContext::pushUserTraceSpan().
 class JsSpan: public jsg::Object {
  public:
-  JsSpan(kj::Maybe<IoOwn<TraceContext>> span,
-      kj::Maybe<kj::Own<jsg::AsyncContextFrame::StorageScope>> userScope);
+  JsSpan(kj::Maybe<IoOwn<TraceContext>> span);
   ~JsSpan() noexcept(false);
 
   // Ends the span, marking its completion. Once ended, the span cannot be modified.
@@ -40,11 +38,7 @@ class JsSpan: public jsg::Object {
   }
 
  private:
-  // The StorageScope must be destroyed BEFORE the span — restoring the frame's user span
-  // to its previous value before the SpanBuilder is closed.  Destruction of members happens
-  // in reverse declaration order, so userScope (declared second) is destroyed first.
   kj::Maybe<IoOwn<TraceContext>> span;
-  kj::Maybe<kj::Own<jsg::AsyncContextFrame::StorageScope>> userScope;
 };
 
 // Module that provides tracing capabilities for Workers.
@@ -55,23 +49,42 @@ class TracingModule: public jsg::Object {
   TracingModule() = default;
   TracingModule(jsg::Lock&, const jsg::Url&) {}
 
-  // Creates a new tracing span with the given name.
-  // The span will be associated with the current IoContext and will track
-  // the execution of the code within its lifetime.
-  // If no IoContext is available (e.g., during initialization), a no-op span
-  // is returned that safely ignores all operations.
+  // Creates a new tracing span with the given name but does NOT make it the active span
+  // in the current async context.  This matches the OTel tracer.startSpan() semantics.
+  // The caller is responsible for ending the span.  Child spans created while this span
+  // is alive will NOT automatically inherit it as their parent — use startActiveSpan()
+  // for that.
+  jsg::Ref<JsSpan> startSpan(jsg::Lock& js, kj::String name);
+
+  // Creates a new tracing span, makes it the active span in the current async context
+  // for the duration of the callback, and returns the callback's result.  This matches
+  // the OTel tracer.startActiveSpan() semantics.
+  //
+  // The span's user SpanParent is pushed into userTraceAsyncContextKey via a stack-scoped
+  // StorageScope.  While the callback executes synchronously, getCurrentUserTraceSpan()
+  // returns this span, so any nested makeUserTraceSpan() calls (e.g. from fetch
+  // subrequests) inherit it as their parent.  The scope is destroyed when the callback
+  // returns (LIFO-safe).  For async callbacks, V8's continuation-preserved embedder data
+  // mechanism captures the frame at await points, so async continuations also see the
+  // correct parent.
+  //
+  // The caller is still responsible for ending the span (typically in a finally block
+  // inside the callback).
   //
   // Example usage:
-  //   const span = tracing.startSpan("my-operation");
-  //   try {
-  //     // ... perform operation ...
-  //   } finally {
-  //     span.end();
-  //   }
-  jsg::Ref<JsSpan> startSpan(jsg::Lock& js, kj::String name);
+  //   const result = tracing.startActiveSpan("my-op", (span) => {
+  //     try {
+  //       return doWork();
+  //     } finally {
+  //       span.end();
+  //     }
+  //   });
+  jsg::Value startActiveSpan(
+      jsg::Lock& js, kj::String name, jsg::Function<jsg::Value(jsg::Ref<JsSpan>)> fn);
 
   JSG_RESOURCE_TYPE(TracingModule) {
     JSG_METHOD(startSpan);
+    JSG_METHOD(startActiveSpan);
 
     JSG_NESTED_TYPE(JsSpan);
   }
