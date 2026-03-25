@@ -327,11 +327,13 @@ class ExecutionContext: public jsg::Object {
             readonly key?: string;
             readonly override?: string;
           };
+          readonly access?: AccessContext;
         });
       } else {
         JSG_TS_OVERRIDE(<Props = unknown> {
           readonly props: Props;
           readonly exports: Cloudflare.Exports;
+          readonly access?: AccessContext;
         });
       }
     } else {
@@ -344,10 +346,12 @@ class ExecutionContext: public jsg::Object {
             readonly key?: string;
             readonly override?: string;
           };
+          readonly access?: AccessContext;
         });
       } else {
         JSG_TS_OVERRIDE(<Props = unknown> {
           readonly props: Props;
+          readonly access?: AccessContext;
         });
       }
     }
