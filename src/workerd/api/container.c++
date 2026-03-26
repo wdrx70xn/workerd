@@ -11,24 +11,42 @@
 #include <kj/filesystem.h>
 
 #include <cmath>
+#include <cstdint>
 
 namespace workerd::api {
 
 namespace {
 
+static constexpr uint64_t kAlnumBits[4] = {
+  UINT64_C(0x03FF000000000000),  // '0'–'9'           (bits 48–57)
+  UINT64_C(0x07FFFFFE87FFFFFE),  // 'A'–'Z', '_', 'a'–'z'
+  UINT64_C(0),                   // 0x80–0xBF: none
+  UINT64_C(0),                   // 0xC0–0xFF: none
+};
+
+static constexpr uint64_t kNoCtrlBits[4] = {
+  UINT64_C(0xFFFFFFFF00000000),  // 0x20–0x3F valid (bits 32–63)
+  UINT64_C(0xFFFFFFFFFFFFFFFF),  // 0x40–0x7F: all valid
+  UINT64_C(0xFFFFFFFFFFFFFFFF),  // 0x80–0xBF: all valid
+  UINT64_C(0xFFFFFFFFFFFFFFFF),  // 0xC0–0xFF: all valid
+};
+
 constexpr bool isAlphanumericString(kj::StringPtr s) {
+  uint64_t acc = ~uint64_t(0);
   for (auto c: s) {
-    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
-      return false;
+    auto uc = static_cast<unsigned char>(c);
+    acc &= kAlnumBits[uc >> 6] >> (uc & 63);
   }
-  return true;
+  return (acc & 1) != 0;
 }
 
 constexpr bool hasNoControlCharacters(kj::StringPtr s) {
+  uint64_t acc = ~uint64_t(0);
   for (auto c: s) {
-    if (static_cast<kj::byte>(c) < 0x20) return false;
+    auto uc = static_cast<unsigned char>(c);
+    acc &= kNoCtrlBits[uc >> 6] >> (uc & 63);
   }
-  return true;
+  return (acc & 1) != 0;
 }
 
 kj::Maybe<kj::Path> parseRestorePath(kj::StringPtr path) {
