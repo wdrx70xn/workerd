@@ -372,23 +372,37 @@ export class DurableObjectExample extends DurableObject {
     // Label name with control character
     assert.throws(
       () => container.start({ labels: { 'bad\x01name': 'value' } }),
-      { message: /Label names must contain only alphanumeric characters/ }
+      {
+        message:
+          /Label names must contain only alphanumeric characters or underscores/,
+      }
     );
 
     // Hyphen in label name
     assert.throws(
       () => container.start({ labels: { 'bad-name': 'goodvalue' } }),
-      { message: /Label names must contain only alphanumeric characters/ }
+      {
+        message:
+          /Label names must contain only alphanumeric characters or underscores/,
+      }
     );
 
     // Emoji in label name
     assert.throws(() => container.start({ labels: { 'test🚀': 'value' } }), {
-      message: /Label names must contain only alphanumeric characters/,
+      message:
+        /Label names must contain only alphanumeric characters or underscores/,
     });
 
     // Accented character in label name
     assert.throws(() => container.start({ labels: { goodnamé: 'cafe' } }), {
-      message: /Label names must contain only alphanumeric characters/,
+      message:
+        /Label names must contain only alphanumeric characters or underscores/,
+    });
+
+    // Accented character in label name
+    assert.throws(() => container.start({ labels: { goodnamé: 'cafe' } }), {
+      message:
+        /Label names must contain only alphanumeric characters or underscores/,
     });
 
     // Control character in label value
@@ -396,13 +410,15 @@ export class DurableObjectExample extends DurableObject {
       message: /Label values cannot contain control characters/,
     });
 
-    // Test that valid alphanumeric labels work
+    // Test that valid alphanumeric labels with underscores work
     container.start({
       labels: {
         MyLabel123: 'any-value_is.fine!',
         abc: 'hello world 🎉',
         TEST: 'café-value',
         team: 'workers',
+        my_label: 'underscore is allowed',
+        SNAKE_CASE: 'also valid',
       },
     });
 

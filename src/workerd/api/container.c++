@@ -18,7 +18,8 @@ namespace {
 
 constexpr bool isAlphanumericString(kj::StringPtr s) {
   for (auto c: s) {
-    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) return false;
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+      return false;
   }
   return true;
 }
@@ -100,9 +101,7 @@ void Container::start(jsg::Lock& js, jsg::Optional<StartupOptions> maybeOptions)
       auto& field = labels.fields[i];
       JSG_REQUIRE(field.name.size() > 0, Error, "Label names cannot be empty");
       JSG_REQUIRE(isAlphanumericString(field.name), Error,
-          "Label names must contain only alphanumeric characters (A-Z, a-z, 0-9) "
-          "at index ",
-          i);
+          "Label names must contain only alphanumeric characters or underscores");
       JSG_REQUIRE(hasNoControlCharacters(field.value), Error,
           "Label values cannot contain control characters (index ", i, ")");
       list[i].setName(field.name);
