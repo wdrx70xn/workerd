@@ -595,6 +595,18 @@ class PromiseWrapper {
       v8::Local<v8::Context> context,
       kj::Maybe<v8::Local<v8::Object>> creator,
       Promise<T>&& promise) {
+    // For void and V8Ref types, thenWrap just passes the value through unchanged,
+    // so we can skip adding the .then() entirely. This avoids an extra microtask
+    // tick that would otherwise cause synchronous require() to fail with
+    // "top-level await" errors when the promise is already resolved.
+    if constexpr (isVoid<T>() || isV8Ref<T>()) {
+      auto ret = promise.consumeHandle(js);
+      if (promise.markedAsHandled) {
+        ret->MarkAsHandled();
+      }
+      return ret;
+    }
+
     // Add a .then() to unwrap the value (i.e. convert C++ value to JavaScript).
     //
     // We use `creator` as the `data` value for this continuation so that the creator object
