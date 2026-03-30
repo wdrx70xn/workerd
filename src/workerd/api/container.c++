@@ -4,18 +4,6 @@
 
 #include "container.h"
 
-// macOS <stdio.h> defines stdin/stdout/stderr as macros, which collide with
-// member names used by ExecProcess / ExecOutput.
-#ifdef stdin
-#undef stdin
-#endif
-#ifdef stdout
-#undef stdout
-#endif
-#ifdef stderr
-#undef stderr
-#endif
-
 #include <workerd/api/http.h>
 #include <workerd/api/streams/readable.h>
 #include <workerd/api/streams/writable.h>
@@ -82,40 +70,41 @@ capnp::ByteStream::Client makeExecPipe(
 // =======================================================================================
 // ExecOutput / ExecProcess
 
-ExecOutput::ExecOutput(kj::Array<kj::byte> stdout, kj::Array<kj::byte> stderr, int exitCode)
-    : stdout(kj::mv(stdout)),
-      stderr(kj::mv(stderr)),
+ExecOutput::ExecOutput(
+    kj::Array<kj::byte> stdoutBytes, kj::Array<kj::byte> stderrBytes, int exitCode)
+    : stdoutBytes(kj::mv(stdoutBytes)),
+      stderrBytes(kj::mv(stderrBytes)),
       exitCode(exitCode) {}
 
 jsg::BufferSource ExecOutput::getStdout(jsg::Lock& js) {
-  return copyBytes(js, stdout);
+  return copyBytes(js, stdoutBytes);
 }
 
 jsg::BufferSource ExecOutput::getStderr(jsg::Lock& js) {
-  return copyBytes(js, stderr);
+  return copyBytes(js, stderrBytes);
 }
 
-ExecProcess::ExecProcess(jsg::Optional<jsg::Ref<WritableStream>> stdin,
-    jsg::Optional<jsg::Ref<ReadableStream>> stdout,
-    jsg::Optional<jsg::Ref<ReadableStream>> stderr,
+ExecProcess::ExecProcess(jsg::Optional<jsg::Ref<WritableStream>> stdinStream,
+    jsg::Optional<jsg::Ref<ReadableStream>> stdoutStream,
+    jsg::Optional<jsg::Ref<ReadableStream>> stderrStream,
     int pid,
     rpc::Container::ProcessHandle::Client handle)
-    : stdin(kj::mv(stdin)),
-      stdout(kj::mv(stdout)),
-      stderr(kj::mv(stderr)),
+    : stdinStream(kj::mv(stdinStream)),
+      stdoutStream(kj::mv(stdoutStream)),
+      stderrStream(kj::mv(stderrStream)),
       pid(pid),
       handle(IoContext::current().addObject(kj::heap(kj::mv(handle)))) {}
 
 jsg::Optional<jsg::Ref<WritableStream>> ExecProcess::getStdin() {
-  return stdin.map([](jsg::Ref<WritableStream>& stream) { return stream.addRef(); });
+  return stdinStream.map([](jsg::Ref<WritableStream>& stream) { return stream.addRef(); });
 }
 
 jsg::Optional<jsg::Ref<ReadableStream>> ExecProcess::getStdout() {
-  return stdout.map([](jsg::Ref<ReadableStream>& stream) { return stream.addRef(); });
+  return stdoutStream.map([](jsg::Ref<ReadableStream>& stream) { return stream.addRef(); });
 }
 
 jsg::Optional<jsg::Ref<ReadableStream>> ExecProcess::getStderr() {
-  return stderr.map([](jsg::Ref<ReadableStream>& stream) { return stream.addRef(); });
+  return stderrStream.map([](jsg::Ref<ReadableStream>& stream) { return stream.addRef(); });
 }
 
 void ExecProcess::ensureExitCodePromise(jsg::Lock& js) {
@@ -165,7 +154,7 @@ jsg::Promise<jsg::Ref<ExecOutput>> ExecProcess::output(jsg::Lock& js) {
   outputCalled = true;
 
   auto stdoutPromise = js.resolvedPromise(emptyByteArray());
-  KJ_IF_SOME(stream, stdout) {
+  KJ_IF_SOME(stream, stdoutStream) {
     JSG_REQUIRE(!stream->isDisturbed(), TypeError,
         "Cannot call output() after stdout has started being consumed.");
     stdoutPromise =
@@ -177,7 +166,7 @@ jsg::Promise<jsg::Ref<ExecOutput>> ExecProcess::output(jsg::Lock& js) {
   }
 
   auto stderrPromise = js.resolvedPromise(emptyByteArray());
-  KJ_IF_SOME(stream, stderr) {
+  KJ_IF_SOME(stream, stderrStream) {
     JSG_REQUIRE(!stream->isDisturbed(), TypeError,
         "Cannot call output() after stderr has started being consumed.");
     stderrPromise = stream->getController()
@@ -424,8 +413,8 @@ jsg::Promise<jsg::Ref<ExecProcess>> Container::exec(
   JSG_REQUIRE(cmd.size() > 0, TypeError, "exec() requires a non-empty command array.");
 
   auto options = kj::mv(maybeOptions).orDefault({});
-  auto stdoutMode = getExecOutputMode(kj::mv(options.stdout), "stdout");
-  auto stderrMode = getExecOutputMode(kj::mv(options.stderr), "stderr");
+  auto stdoutMode = getExecOutputMode(kj::mv(options.$stdout), "stdout");
+  auto stderrMode = getExecOutputMode(kj::mv(options.$stderr), "stderr");
   bool combinedOutput = stderrMode == "combined";
   JSG_REQUIRE(!combinedOutput || stdoutMode == "pipe", TypeError,
       "stderr: \"combined\" requires stdout to be \"pipe\".");
@@ -443,14 +432,14 @@ jsg::Promise<jsg::Ref<ExecProcess>> Container::exec(
   kj::Maybe<kj::Own<kj::AsyncInputStream>> stdoutInput;
   if (stdoutMode == "pipe") {
     auto pipe = kj::newOneWayPipe();
-    req.setStdout(makeExecPipe(byteStreamFactory, kj::mv(pipe.out)));
+    req.setStdoutWriter(makeExecPipe(byteStreamFactory, kj::mv(pipe.out)));
     stdoutInput = kj::mv(pipe.in);
   }
 
   kj::Maybe<kj::Own<kj::AsyncInputStream>> stderrInput;
   if (!combinedOutput && stderrMode == "pipe") {
     auto pipe = kj::newOneWayPipe();
-    req.setStderr(makeExecPipe(byteStreamFactory, kj::mv(pipe.out)));
+    req.setStderrWriter(makeExecPipe(byteStreamFactory, kj::mv(pipe.out)));
     stderrInput = kj::mv(pipe.in);
   }
 
@@ -507,12 +496,12 @@ jsg::Promise<jsg::Ref<ExecProcess>> Container::exec(
 
     // If stdin is undefined, the JS API promises immediate EOF. We still use the pipelined stdin()
     // capability so exec() doesn't wait on an extra round-trip.
-    KJ_IF_SOME(stdinOption, options.stdin) {
-      auto stdinRequest = handle.stdinRequest(capnp::MessageSize{4, 0});
-      // Get the stdin() ByteStream, use the pipelined capability
+    KJ_IF_SOME(stdinOption, options.$stdin) {
+      auto stdinRequest = handle.stdinWriterRequest(capnp::MessageSize{4, 0});
+      // Get the stdinWriter() ByteStream, use the pipelined capability
       auto stdinPipeline = stdinRequest.send();
       // ... adapt bytestream into a writer
-      auto stdinWriter = byteStreamFactory.capnpToKjExplicitEnd(stdinPipeline.getStdin());
+      auto stdinWriter = byteStreamFactory.capnpToKjExplicitEnd(stdinPipeline.getWriter());
 
       KJ_SWITCH_ONEOF(stdinOption) {
         // user sets ReadableStream...
@@ -535,9 +524,9 @@ jsg::Promise<jsg::Ref<ExecProcess>> Container::exec(
 
       // all good, we have the stdinStream set
     } else {
-      auto stdinRequest = handle.stdinRequest(capnp::MessageSize{4, 0});
+      auto stdinRequest = handle.stdinWriterRequest(capnp::MessageSize{4, 0});
       auto stdinPipeline = stdinRequest.send();
-      auto stdinWriter = byteStreamFactory.capnpToKjExplicitEnd(stdinPipeline.getStdin());
+      auto stdinWriter = byteStreamFactory.capnpToKjExplicitEnd(stdinPipeline.getWriter());
       ioContext.addTask(stdinWriter->end().attach(kj::mv(stdinWriter)));
     }
 

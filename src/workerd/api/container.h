@@ -17,7 +17,7 @@ namespace workerd::api {
 class Fetcher;
 class ExecOutput: public jsg::Object {
  public:
-  ExecOutput(kj::Array<kj::byte> stdout, kj::Array<kj::byte> stderr, int exitCode);
+  ExecOutput(kj::Array<kj::byte> stdoutBytes, kj::Array<kj::byte> stderrBytes, int exitCode);
 
   jsg::BufferSource getStdout(jsg::Lock& js);
   jsg::BufferSource getStderr(jsg::Lock& js);
@@ -38,25 +38,27 @@ class ExecOutput: public jsg::Object {
   }
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-    tracker.trackField("stdout", stdout);
-    tracker.trackField("stderr", stderr);
+    tracker.trackField("stdout", stdoutBytes);
+    tracker.trackField("stderr", stderrBytes);
   }
 
  private:
-  kj::Array<kj::byte> stdout;
-  kj::Array<kj::byte> stderr;
+  kj::Array<kj::byte> stdoutBytes;
+  kj::Array<kj::byte> stderrBytes;
   int exitCode;
 };
 
 struct ExecOptions {
-  jsg::Optional<kj::OneOf<jsg::Ref<ReadableStream>, kj::String>> stdin;
-  jsg::Optional<kj::String> stdout;
-  jsg::Optional<kj::String> stderr;
+  // $ prefix avoids collision with stdin/stdout/stderr macros from <stdio.h>;
+  // JSG_STRUCT strips the $ when exposing to JS.
+  jsg::Optional<kj::OneOf<jsg::Ref<ReadableStream>, kj::String>> $stdin;
+  jsg::Optional<kj::String> $stdout;
+  jsg::Optional<kj::String> $stderr;
   jsg::Optional<kj::String> cwd;
   jsg::Optional<jsg::Dict<kj::String>> env;
   jsg::Optional<kj::String> user;
 
-  JSG_STRUCT(stdin, stdout, stderr, cwd, env, user);
+  JSG_STRUCT($stdin, $stdout, $stderr, cwd, env, user);
   JSG_STRUCT_TS_OVERRIDE(ContainerExecOptions {
     stdin?: ReadableStream | "pipe";
     stdout?: "pipe" | "ignore";
@@ -64,14 +66,17 @@ struct ExecOptions {
     cwd?: string;
     env?: Record<string, string>;
     user?: string;
+    $stdin: never;
+    $stdout: never;
+    $stderr: never;
   });
 };
 
 class ExecProcess: public jsg::Object {
  public:
-  ExecProcess(jsg::Optional<jsg::Ref<WritableStream>> stdin,
-      jsg::Optional<jsg::Ref<ReadableStream>> stdout,
-      jsg::Optional<jsg::Ref<ReadableStream>> stderr,
+  ExecProcess(jsg::Optional<jsg::Ref<WritableStream>> stdinStream,
+      jsg::Optional<jsg::Ref<ReadableStream>> stdoutStream,
+      jsg::Optional<jsg::Ref<ReadableStream>> stderrStream,
       int pid,
       rpc::Container::ProcessHandle::Client handle);
 
@@ -107,9 +112,9 @@ class ExecProcess: public jsg::Object {
   }
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-    tracker.trackField("stdin", stdin);
-    tracker.trackField("stdout", stdout);
-    tracker.trackField("stderr", stderr);
+    tracker.trackField("stdin", stdinStream);
+    tracker.trackField("stdout", stdoutStream);
+    tracker.trackField("stderr", stderrStream);
     tracker.trackField("exitCodePromise", exitCodePromise);
     tracker.trackField("exitCodePromiseCopy", exitCodePromiseCopy);
   }
@@ -118,9 +123,9 @@ class ExecProcess: public jsg::Object {
   void ensureExitCodePromise(jsg::Lock& js);
   jsg::Promise<int> getExitCodeForOutput(jsg::Lock& js);
 
-  jsg::Optional<jsg::Ref<WritableStream>> stdin;
-  jsg::Optional<jsg::Ref<ReadableStream>> stdout;
-  jsg::Optional<jsg::Ref<ReadableStream>> stderr;
+  jsg::Optional<jsg::Ref<WritableStream>> stdinStream;
+  jsg::Optional<jsg::Ref<ReadableStream>> stdoutStream;
+  jsg::Optional<jsg::Ref<ReadableStream>> stderrStream;
   int pid;
   IoOwn<rpc::Container::ProcessHandle::Client> handle;
   kj::Maybe<jsg::MemoizedIdentity<jsg::Promise<int>>> exitCodePromise;
@@ -129,7 +134,7 @@ class ExecProcess: public jsg::Object {
   bool outputCalled = false;
 
   void visitForGc(jsg::GcVisitor& visitor) {
-    visitor.visit(stdin, stdout, stderr, exitCodePromise, exitCodePromiseCopy);
+    visitor.visit(stdinStream, stdoutStream, stderrStream, exitCodePromise, exitCodePromiseCopy);
   }
 };
 

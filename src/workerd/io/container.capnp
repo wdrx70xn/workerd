@@ -133,7 +133,7 @@ interface Container @0x9aaceefc06523bca {
     wait @0 () -> (exitCode :Int32);
     # Waits for the process to exit and returns its exit code.
 
-    stdin @1 () -> (stdin :ByteStream);
+    stdinWriter @1 () -> (writer :ByteStream);
     # Retrieves a ByteStream handle to write to the process's stdin.
     # If not called before wait(), stdin automatically EOFs.
     # Throws an error if called after wait().
@@ -237,10 +237,10 @@ interface Container @0x9aaceefc06523bca {
   snapshotContainer @11 SnapshotContainerParams -> (snapshot :ContainerSnapshot);
   # Creates a full container snapshot for the running container.
 
-  exec @12 (cmd :List(Text), stdout :ByteStream, stderr :ByteStream, params :ExecOptions)
-      -> (process :Process);
+  exec @12 (cmd :List(Text), stdoutWriter :ByteStream, stderrWriter :ByteStream,
+      params :ExecOptions) -> (process :Process);
   # Executes a short-lived process in the running container.
   #
-  # If stdout/stderr are not provided, output is discarded. If params.combinedOutput is true,
-  # stderr is merged into stdout and the stderr capability is ignored.
+  # If stdoutWriter/stderrWriter are not provided, output is discarded. If params.combinedOutput
+  # is true, stderr is merged into stdout and the stderrWriter capability is ignored.
 }
