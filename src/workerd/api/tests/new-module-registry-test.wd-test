@@ -74,6 +74,9 @@ const unitTests :Workerd.Config = (
           "new_module_registry",
           "experimental",
         ],
+        bindings = [
+          (name = "unsafe", unsafeEval = void),
+        ],
       ),
     ),
   ],

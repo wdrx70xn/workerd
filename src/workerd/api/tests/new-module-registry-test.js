@@ -322,6 +322,23 @@ export const complexModuleTest = {
   },
 };
 
+// Regression test: getBuiltinModule called from a function defined in eval'd
+// code should work. Previously failed on first invocation with "top-level await"
+// error due to extra microtask tick from wrapSimplePromise().
+export const getBuiltinModuleFromEval = {
+  async test(_, env) {
+    const code = `"use strict";async (exports)=>{
+      exports.getPath = () => process.getBuiltinModule("node:path");
+    }`;
+    const exports = {};
+    const fn = env.unsafe.eval(code);
+    await fn(exports);
+
+    const path = exports.getPath();
+    ok(path.join, 'node:path should have join');
+  },
+};
+
 // TODO(now): Tests
 // * [x] Include tests for all known module types
 //   * [x] ESM
