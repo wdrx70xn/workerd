@@ -51,11 +51,16 @@ jsg::JsValue callInstantiateEmscriptenModule(jsg::Lock& js,
       js.allocBackingStore(pythonStdlibZipReader.size(), jsg::Lock::AllocOption::UNINITIALIZED);
   auto pythonStdlibZip = v8::ArrayBuffer::New(js.v8Isolate, kj::mv(backingStore));
   memcpy(pythonStdlibZip->Data(), pythonStdlibZipReader.begin(), pythonStdlibZipReader.size());
+  KJ_LOG(WARNING, "Starting synchronous WASM compile of pyodide.asm.wasm",
+      pyodideAsmWasmReader.size());
   auto pyodideAsmWasm = jsg::check(v8::WasmModuleObject::Compile(js.v8Isolate,
       v8::MemorySpan<const uint8_t>(pyodideAsmWasmReader.begin(), pyodideAsmWasmReader.size())));
-  return resolvePromise(js,
+  KJ_LOG(WARNING, "WASM compile complete, calling instantiateEmscriptenModule");
+  auto result = resolvePromise(js,
       func.call(js, js.null(), js.boolean(isWorkerd), jsg::JsValue(pythonStdlibZip),
           jsg::JsValue(pyodideAsmWasm)));
+  KJ_LOG(WARNING, "instantiateEmscriptenModule resolved successfully");
+  return result;
 }
 
 EmscriptenRuntime EmscriptenRuntime::initialize(
