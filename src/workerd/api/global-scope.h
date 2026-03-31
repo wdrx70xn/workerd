@@ -289,6 +289,19 @@ class ExecutionContext: public jsg::Object {
     return js.undefined();
   }
 
+  // Called by the host runtime to set the Access context for this request.
+  // Must be called before the worker's handler is invoked.
+  void setAccess(jsg::Lock& js, jsg::JsRef<jsg::JsValue> value) {
+    access = kj::mv(value);
+  }
+
+  jsg::JsValue getAccess(jsg::Lock& js) {
+    KJ_IF_SOME(a, access) {
+      return a.getHandle(js);
+    }
+    return js.undefined();
+  }
+
   JSG_RESOURCE_TYPE(ExecutionContext, CompatibilityFlags::Reader flags) {
     JSG_METHOD(waitUntil);
     JSG_METHOD(passThroughOnException);
@@ -299,6 +312,9 @@ class ExecutionContext: public jsg::Object {
     JSG_LAZY_INSTANCE_PROPERTY(cache, getCache);
     if (flags.getEnableVersionApi()) {
       JSG_LAZY_INSTANCE_PROPERTY(version, getVersion);
+    }
+    if (flags.getEnableCtxAccess()) {
+      JSG_LAZY_INSTANCE_PROPERTY(access, getAccess);
     }
 
     if (flags.getWorkerdExperimental()) {
@@ -327,13 +343,13 @@ class ExecutionContext: public jsg::Object {
             readonly key?: string;
             readonly override?: string;
           };
-          readonly access?: AccessContext;
+          readonly access?: CloudflareAccessContext;
         });
       } else {
         JSG_TS_OVERRIDE(<Props = unknown> {
           readonly props: Props;
           readonly exports: Cloudflare.Exports;
-          readonly access?: AccessContext;
+          readonly access?: CloudflareAccessContext;
         });
       }
     } else {
@@ -346,12 +362,12 @@ class ExecutionContext: public jsg::Object {
             readonly key?: string;
             readonly override?: string;
           };
-          readonly access?: AccessContext;
+          readonly access?: CloudflareAccessContext;
         });
       } else {
         JSG_TS_OVERRIDE(<Props = unknown> {
           readonly props: Props;
-          readonly access?: AccessContext;
+          readonly access?: CloudflareAccessContext;
         });
       }
     }
@@ -360,16 +376,19 @@ class ExecutionContext: public jsg::Object {
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
     tracker.trackField("props", props);
     tracker.trackField("version", version);
+    tracker.trackField("access", access);
   }
 
  private:
   jsg::JsRef<jsg::JsValue> exports;
   jsg::JsRef<jsg::JsValue> props;
   kj::Maybe<jsg::JsRef<jsg::JsValue>> version;
+  kj::Maybe<jsg::JsRef<jsg::JsValue>> access;
 
   void visitForGc(jsg::GcVisitor& visitor) {
     visitor.visit(props);
     visitor.visit(version);
+    visitor.visit(access);
   }
 };
 
