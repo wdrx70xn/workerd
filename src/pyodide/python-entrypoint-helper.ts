@@ -594,6 +594,7 @@ function handleDefaultClass(
 }
 
 export async function initPython(): Promise<PythonInitResult> {
+  console.error('[initPython] starting');
   const handlers: {
     [handlerName: string]: Handler;
   } = {};
@@ -604,16 +605,23 @@ export async function initPython(): Promise<PythonInitResult> {
     workflowEntrypoints: [],
   };
 
+  console.error('[initPython] calling getMainModule');
   const mainModule = await getMainModule();
+  console.error('[initPython] getMainModule complete');
 
   // In order to get the entrypoint classes exported by the worker, we use a Python module
   // to introspect the user's main module. So we are effectively using Python to analyse the
   // classes exported by the user worker here. The class names are then exported from here and
   // used to create the equivalent JS classes via makeEntrypointClass.
+  console.error('[initPython] calling getIntrospectionMod');
   const introspectionMod = await getIntrospectionMod();
+  console.error(
+    '[initPython] getIntrospectionMod complete, collecting entrypoint classes'
+  );
   pythonEntrypointClasses =
     introspectionMod.collect_entrypoint_classes(mainModule);
   handleDefaultClass(handlers, pythonEntrypointClasses.workerEntrypoints);
+  console.error('[initPython] entrypoint classes collected');
 
   if (LEGACY_GLOBAL_HANDLERS) {
     // We add all handlers when running in workerd, so that we can handle the case where the

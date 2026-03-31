@@ -33,11 +33,14 @@ async function doAnImport(name) {
 }
 
 // Pass the import function to the helper
+console.error('[python-entrypoint] calling setDoAnImport');
 await setDoAnImport(doAnImport, WorkerEntrypoint);
+console.error('[python-entrypoint] setDoAnImport complete, calling initPython');
 
 // Initialise Python only after the import function has been set above.
 const { handlers, pythonEntrypointClasses, makeEntrypointClass } =
   await initPython();
+console.error('[python-entrypoint] initPython complete');
 
 function makeEntrypointClassFromNames(classes, baseClass) {
   return classes.map(({ className, methodNames }) => [
