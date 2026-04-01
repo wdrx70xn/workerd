@@ -5046,9 +5046,11 @@ kj::Own<IoChannelFactory::ActorClassChannel> Server::resolveActorClass(
 class Server::WorkerdBootstrapImpl final: public rpc::WorkerdBootstrap::Server {
  public:
   WorkerdBootstrapImpl(kj::Own<IoChannelFactory::SubrequestChannel> service,
-      capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+      capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
+      capnp::ByteStreamFactory& byteStreamFactory)
       : service(kj::mv(service)),
-        httpOverCapnpFactory(httpOverCapnpFactory) {}
+        httpOverCapnpFactory(httpOverCapnpFactory),
+        byteStreamFactory(byteStreamFactory) {}
 
   kj::Promise<void> startEvent(StartEventContext context) override {
     // Extract the optional cf blob from the RPC params and pass it along with the
@@ -5061,20 +5063,23 @@ class Server::WorkerdBootstrapImpl final: public rpc::WorkerdBootstrap::Server {
     }
     context.initResults(capnp::MessageSize{4, 1})
         .setDispatcher(kj::heap<EventDispatcherImpl>(
-            httpOverCapnpFactory, kj::addRef(*service), kj::mv(cfBlobJson)));
+            httpOverCapnpFactory, byteStreamFactory, kj::addRef(*service), kj::mv(cfBlobJson)));
     return kj::READY_NOW;
   }
 
  private:
   kj::Own<IoChannelFactory::SubrequestChannel> service;
   capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+  capnp::ByteStreamFactory& byteStreamFactory;
 
   class EventDispatcherImpl final: public rpc::EventDispatcher::Server {
    public:
     EventDispatcherImpl(capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
+        capnp::ByteStreamFactory& byteStreamFactory,
         kj::Own<IoChannelFactory::SubrequestChannel> service,
         kj::Maybe<kj::String> cfBlobJson)
         : httpOverCapnpFactory(httpOverCapnpFactory),
+          byteStreamFactory(byteStreamFactory),
           service(kj::mv(service)),
           cfBlobJson(kj::mv(cfBlobJson)) {}
 
@@ -5144,8 +5149,101 @@ class Server::WorkerdBootstrapImpl final: public rpc::WorkerdBootstrap::Server {
       response.setResult(result.outcome);
     }
 
+    kj::Promise<void> connect(ConnectContext context) override {
+      auto params = context.getParams();
+      auto host = kj::str(params.getHost());
+
+      auto worker = getWorker();
+
+      // Create a two-way pipe. One end (ends[1]) will be the `connection` parameter passed to
+      // WorkerInterface::connect(). The other end (ends[0]) bridges to/from the capnp ByteStreams.
+      auto pipe = kj::newTwoWayPipe();
+
+      // Set up the "up" direction (caller -> worker): convert the `down` ByteStream param
+      // (which the caller writes to send data to us) into a KJ input stream, then pump
+      // into the pipe so the worker can read it.
+      // Note: `down` is the ByteStream the *caller* provides — the caller writes to it,
+      // data flows down to us. We read from it and write into the pipe's ends[0].
+      auto downStream = byteStreamFactory.capnpToKjExplicitEnd(params.getDown());
+      // downStream is an AsyncOutputStream that receives writes from the remote ByteStream.
+      // We need to pump data FROM the remote into ends[0]'s write side.
+      // capnpToKjExplicitEnd gives us an output stream we write to — but we actually need
+      // to read from the remote ByteStream. The ByteStreamFactory handles this: the remote
+      // calls write() on the ByteStream, which forwards to our output stream.
+      // Actually, we need a different approach: create a OneWayPipe, give the out end to the
+      // ByteStreamFactory as a sink for the remote's writes, and pump from the in end.
+      //
+      // The `down` ByteStream is a Client capability that the caller provided. The caller
+      // (RpcWorkerInterface) created it by wrapping a kjToCapnp(pipe.out) — so it's a sink
+      // that the server (us) writes to. Wait — that's wrong. Let me reconsider.
+      //
+      // In the Container.Port pattern:
+      //   - Caller provides `down` = kjToCapnp(downPipe.out) — a ByteStream the SERVER writes to
+      //   - Server receives `down` Client and writes worker output data into it
+      //
+      // So here, on the server side, we should WRITE the worker's output into the `down`
+      // ByteStream. And the `up` ByteStream (which we return) is something the CALLER writes
+      // to, carrying input data to the worker.
+      //
+      // Direction correction:
+      //   down = worker output -> flows to caller (server writes to it)
+      //   up = caller input -> flows to worker (caller writes to it)
+
+      // Actually let me just follow the container server-side pattern directly.
+      // We need to:
+      //   1. Pump from pipe.ends[0] read side INTO the `down` ByteStream (worker output -> caller)
+      //   2. Create a OneWayPipe for `up`, return the out end as ByteStream, pump from in end
+      //      into pipe.ends[0] write side (caller input -> worker)
+
+      // down direction: worker output -> caller
+      // Convert the `down` ByteStream::Client into a KJ output stream we can write to.
+      auto downOut = byteStreamFactory.capnpToKjExplicitEnd(params.getDown());
+      auto downPumpTask = pipe.ends[0]->pumpTo(*downOut)
+                              .then([&downOut = *downOut](uint64_t) mutable {
+        return downOut.end();
+      }).then([downOut = kj::mv(downOut)]() mutable -> kj::Promise<void> {
+        return kj::NEVER_DONE;
+      });
+
+      // up direction: caller -> worker
+      // Create a OneWayPipe. Return the out end as a ByteStream (caller writes to it).
+      // Pump from the in end into pipe.ends[0]'s write side (becomes worker's readable).
+      auto upPipe = kj::newOneWayPipe();
+      context.initResults(capnp::MessageSize{4, 1})
+          .setUp(byteStreamFactory.kjToCapnp(kj::mv(upPipe.out)));
+
+      auto upPumpTask =
+          upPipe.in->pumpTo(*pipe.ends[0])
+              .then([&end = *pipe.ends[0], up = kj::mv(upPipe.in)](uint64_t)
+                  -> kj::Promise<void> {
+        end.shutdownWrite();
+        return kj::NEVER_DONE;
+      });
+
+      // Dispatch the connect event to the worker. Use a no-op ConnectResponse since the
+      // connection is always accepted at this RPC layer (rejection surfaces as an RPC error).
+      struct NoOpConnectResponse final: public kj::HttpService::ConnectResponse {
+        void accept(uint, kj::StringPtr, const kj::HttpHeaders&) override {}
+        kj::Own<kj::AsyncOutputStream> reject(uint, kj::StringPtr,
+            const kj::HttpHeaders&, kj::Maybe<uint64_t>) override {
+          return newNullOutputStream();
+        }
+      };
+
+      auto connectResponse = kj::heap<NoOpConnectResponse>();
+      kj::HttpHeaders headers(kj::HttpHeaderTable{});
+      auto connectPromise = worker->connect(
+          host, headers, *pipe.ends[1], *connectResponse, {});
+
+      co_await connectPromise.attach(
+          kj::mv(worker), kj::mv(connectResponse), kj::mv(headers), kj::mv(pipe.ends[1]));
+      co_await kj::joinPromisesFailFast(kj::arr(kj::mv(downPumpTask), kj::mv(upPumpTask)))
+          .attach(kj::mv(pipe.ends[0]));
+    }
+
    private:
     capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+    capnp::ByteStreamFactory& byteStreamFactory;
     kj::Maybe<kj::Own<IoChannelFactory::SubrequestChannel>> service;
     kj::Maybe<kj::String> cfBlobJson;
 
@@ -5177,13 +5275,15 @@ class Server::HttpListener final: public kj::Refcounted {
       kj::Own<HttpRewriter> rewriter,
       kj::HttpHeaderTable& headerTable,
       kj::Timer& timer,
-      capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+      capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
+      capnp::ByteStreamFactory& byteStreamFactory)
       : owner(owner),
         listener(kj::mv(listener)),
         service(kj::mv(service)),
         headerTable(headerTable),
         timer(timer),
         httpOverCapnpFactory(httpOverCapnpFactory),
+        byteStreamFactory(byteStreamFactory),
         physicalProtocol(physicalProtocol),
         rewriter(kj::mv(rewriter)) {}
 
@@ -5252,6 +5352,7 @@ class Server::HttpListener final: public kj::Refcounted {
   kj::HttpHeaderTable& headerTable;
   kj::Timer& timer;
   capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+  capnp::ByteStreamFactory& byteStreamFactory;
   kj::StringPtr physicalProtocol;
   kj::Own<HttpRewriter> rewriter;
 
@@ -5264,7 +5365,8 @@ class Server::HttpListener final: public kj::Refcounted {
 
     // Capnp server not initialized. Create it now.
     auto& s = capnpServer.emplace(
-        kj::heap<WorkerdBootstrapImpl>(kj::addRef(*service), httpOverCapnpFactory));
+        kj::heap<WorkerdBootstrapImpl>(kj::addRef(*service), httpOverCapnpFactory,
+            byteStreamFactory));
     return s.accept(conn);
   }
 
@@ -5440,7 +5542,8 @@ kj::Promise<void> Server::listenHttp(kj::Own<kj::ConnectionReceiver> listener,
     kj::Own<HttpRewriter> rewriter) {
   auto obj =
       kj::refcounted<HttpListener>(*this, kj::mv(listener), kj::mv(service), physicalProtocol,
-          kj::mv(rewriter), globalContext->headerTable, timer, globalContext->httpOverCapnpFactory);
+          kj::mv(rewriter), globalContext->headerTable, timer, globalContext->httpOverCapnpFactory,
+          globalContext->byteStreamFactory);
   co_return co_await obj->run();
 }
 
@@ -5458,13 +5561,16 @@ class Server::DebugPortListener {
  public:
   DebugPortListener(Server& owner,
       kj::Own<kj::ConnectionReceiver> listener,
-      capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+      capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
+      capnp::ByteStreamFactory& byteStreamFactory)
       : owner(owner),
         listener(kj::mv(listener)),
-        httpOverCapnpFactory(httpOverCapnpFactory) {}
+        httpOverCapnpFactory(httpOverCapnpFactory),
+        byteStreamFactory(byteStreamFactory) {}
 
   kj::Promise<void> run() {
-    capnp::TwoPartyServer server(kj::heap<WorkerdDebugPortImpl>(&owner, httpOverCapnpFactory));
+    capnp::TwoPartyServer server(
+        kj::heap<WorkerdDebugPortImpl>(&owner, httpOverCapnpFactory, byteStreamFactory));
     co_return co_await server.listen(*listener);
   }
 
@@ -5472,13 +5578,17 @@ class Server::DebugPortListener {
   Server& owner;
   kj::Own<kj::ConnectionReceiver> listener;
   capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+  capnp::ByteStreamFactory& byteStreamFactory;
 
   class WorkerdDebugPortImpl final: public rpc::WorkerdDebugPort::Server {
    public:
     WorkerdDebugPortImpl(
-        workerd::server::Server* srvPtr, capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+        workerd::server::Server* srvPtr,
+        capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
+        capnp::ByteStreamFactory& byteStreamFactory)
         : srv(*srvPtr),
-          httpOverCapnpFactory(httpOverCapnpFactory) {}
+          httpOverCapnpFactory(httpOverCapnpFactory),
+          byteStreamFactory(byteStreamFactory) {}
 
     kj::Promise<void> getEntrypoint(GetEntrypointContext context) override {
       auto params = context.getParams();
@@ -5527,7 +5637,8 @@ class Server::DebugPortListener {
       // Return a WorkerdBootstrap that wraps this service using the generic implementation.
       context.initResults(capnp::MessageSize{4, 1})
           .setEntrypoint(
-              kj::heap<WorkerdBootstrapImpl>(kj::mv(targetService), httpOverCapnpFactory));
+              kj::heap<WorkerdBootstrapImpl>(kj::mv(targetService), httpOverCapnpFactory,
+                  byteStreamFactory));
       return kj::READY_NOW;
     }
 
@@ -5571,18 +5682,21 @@ class Server::DebugPortListener {
       // Wrap the actor channel using the generic WorkerdBootstrap implementation.
       context.initResults(capnp::MessageSize{4, 1})
           .setActor(kj::heap<WorkerdBootstrapImpl>(
-              actorNamespace.getActorChannel(kj::mv(actorId)), httpOverCapnpFactory));
+              actorNamespace.getActorChannel(kj::mv(actorId)), httpOverCapnpFactory,
+              byteStreamFactory));
       return kj::READY_NOW;
     }
 
    private:
     workerd::server::Server& srv;
     capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+    capnp::ByteStreamFactory& byteStreamFactory;
   };
 };
 
 kj::Promise<void> Server::listenDebugPort(kj::Own<kj::ConnectionReceiver> listener) {
-  DebugPortListener obj(*this, kj::mv(listener), globalContext->httpOverCapnpFactory);
+  DebugPortListener obj(*this, kj::mv(listener), globalContext->httpOverCapnpFactory,
+      globalContext->byteStreamFactory);
   co_return co_await obj.run();
 }
 

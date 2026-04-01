@@ -810,13 +810,17 @@ interface EventDispatcher @0xf20697475ec1752d {
   # be made. This call must be made using pipelining since `tailStreamSession()` won't return
   # until after the call completes. result is accessed after the session is complete.
 
+  connect @11 (host :Text, down :ByteStream) -> (up :ByteStream) $Cxx.allowCancellation;
+  # Delivers an inbound TCP connection to the worker's connect() handler.
+  # `host` is the target address (e.g., "example.com:443").
+  # `down` is a ByteStream the caller provides for the worker to write to; data flows from
+  # the worker down to the caller through this stream.
+  # Returns `up`, a ByteStream the caller writes to in order to send data up to the worker.
+
   obsolete5 @5();
   obsolete6 @6();
   obsolete7 @7();
   # Deleted methods, do not reuse these numbers.
-
-  # Other methods might be added to handle other kinds of events, e.g. TCP connections, or maybe
-  # even native Cap'n Proto RPC eventually.
 }
 
 interface WorkerdBootstrap {

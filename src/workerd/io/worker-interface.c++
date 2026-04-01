@@ -376,9 +376,48 @@ kj::Promise<void> RpcWorkerInterface::connect(kj::StringPtr host,
     kj::AsyncIoStream& connection,
     ConnectResponse& tunnel,
     kj::HttpConnectSettings settings) {
-  auto inner = httpOverCapnpFactory.capnpToKj(dispatcher.getHttpServiceRequest().send().getHttp());
-  auto promise = inner->connect(host, headers, connection, tunnel, kj::mv(settings));
-  return promise.attach(kj::mv(inner));
+  // Dispatch via the dedicated EventDispatcher.connect() method using ByteStreams,
+  // following the same bidirectional pump pattern as Container.Port.connect().
+  auto req = dispatcher.connectRequest(capnp::MessageSize{host.size() / sizeof(capnp::word) + 4, 1});
+  req.setHost(host);
+
+  // Set up the "down" direction (worker -> caller).
+  // The server (worker) writes into the `down` ByteStream; data flows through the pipe back
+  // to us. We pump from downPipe.in into `connection`'s write side so the caller receives
+  // the worker's output.
+  auto downPipe = kj::newOneWayPipe();
+  req.setDown(byteStreamFactory.kjToCapnp(kj::mv(downPipe.out)));
+
+  auto pipeline = req.send();
+
+  // Drop the request builder to avoid pinning the message in memory during the co_await.
+  { auto drop = kj::mv(req); }
+
+  auto downPumpTask =
+      downPipe.in->pumpTo(connection)
+          .then([&connection, down = kj::mv(downPipe.in)](uint64_t) -> kj::Promise<void> {
+    connection.shutdownWrite();
+    return kj::NEVER_DONE;
+  });
+
+  // Set up the "up" direction (caller -> worker).
+  // We read from `connection` and write into the `up` ByteStream so the data flows up to
+  // the worker's readable side.
+  auto up = pipeline.getUp();
+  auto upStream = byteStreamFactory.capnpToKjExplicitEnd(up);
+  auto upPumpTask = connection.pumpTo(*upStream)
+                        .then([&upStream = *upStream](uint64_t) mutable {
+    return upStream.end();
+  }).then([up = kj::mv(up), upStream = kj::mv(upStream)]() mutable -> kj::Promise<void> {
+    return kj::NEVER_DONE;
+  });
+
+  // Accept the tunnel immediately — from the caller's perspective the connection is open as soon
+  // as the RPC call is in flight.
+  tunnel.accept(200, "OK", headers);
+
+  co_await pipeline.ignoreResult();
+  co_await kj::joinPromisesFailFast(kj::arr(kj::mv(upPumpTask), kj::mv(downPumpTask)));
 }
 
 kj::Promise<void> RpcWorkerInterface::prewarm(kj::StringPtr url) {
