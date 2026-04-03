@@ -292,6 +292,10 @@ struct SpanContext {
   void toCapnp(rpc::SpanContext::Builder writer) const;
   SpanContext clone() const;
 
+  // Parse a W3C traceparent string into a SpanContext.
+  // Format: "{version}-{trace-id}-{parent-id}-{flags}"
+  static kj::Maybe<SpanContext> fromTraceparent(kj::StringPtr traceparent);
+
  private:
   TraceId traceId;
   kj::Maybe<SpanId> spanId;
