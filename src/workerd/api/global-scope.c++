@@ -599,13 +599,17 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
         return WorkerInterface::AlarmResult{.retry = true,
           .retryCountsAgainstLimit = shouldRetryCountsAgainstLimits,
           .outcome = outcome,
-          .errorDescription = kj::str(description)};
+          .errorDescription = kj::str(description),
+          .isUserError = isUserGeneratedError};
       })
           .then([&context](WorkerInterface::AlarmResult result)
                     -> kj::Promise<WorkerInterface::AlarmResult> {
+        // Carry forward the handler's user-error classification so the output-gate
+        // error handler cannot downgrade it.
+        bool priorHandlerWasUserError = result.isUserError;
         return context.waitForOutputLocks().then([result = kj::mv(result)]() mutable {
           return kj::mv(result);
-        }, [&context](kj::Exception&& e) {
+        }, [&context, priorHandlerWasUserError](kj::Exception&& e) {
           auto& actor = KJ_ASSERT_NONNULL(context.getActor());
           kj::String actorId;
           KJ_SWITCH_ONEOF(actor.getId()) {
@@ -616,8 +620,9 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
               actorId = kj::str(s);
             }
           }
-          auto isUserGeneratedError = isAlarmFailureUserError(
-              e.getDescription(), e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none);
+          auto isUserGeneratedError = isAlarmFailureUserError(e.getDescription(),
+                                          e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none) ||
+              priorHandlerWasUserError;
           auto shouldRetryCountsAgainstLimits = isUserGeneratedError;
           if (auto desc = e.getDescription();
               !jsg::isTunneledException(desc) && !jsg::isDoNotLogException(desc)) {
