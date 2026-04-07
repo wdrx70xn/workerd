@@ -289,8 +289,14 @@ class ExecutionContext: public jsg::Object {
     return js.undefined();
   }
 
-  // Called by the host runtime to set the Access context for this request.
+  // Called by the host runtime (edgeworker) to set the Access context for this request.
   // Must be called before the worker's handler is invoked.
+  //
+  // Unlike other ExecutionContext fields (props, version, exports) which are injected through the
+  // constructor, access uses a post-construction setter because the Access context is assembled by
+  // the host runtime after ExecutionContext construction but before handler invocation. The access
+  // data (audience claim, identity fetcher) originates from the Cloudflare Access integration
+  // pipeline and is not available during ExecutionContext construction in edgeworker.
   void setAccess(jsg::Lock& js, jsg::JsRef<jsg::JsValue> value) {
     access = kj::mv(value);
   }
@@ -332,6 +338,11 @@ class ExecutionContext: public jsg::Object {
     }
 
     // TODO(soon): This is getting unwieldy.
+    // Note: `access` is included unconditionally in all TS_OVERRIDE branches (unlike `version`
+    // which is gated by enableVersionApi). This is intentional — adding another conditional would
+    // double the branch count (from 4 to 8). Since `access` is optional (`?`), the type is
+    // correct regardless of whether the flag is enabled (the property will be undefined at runtime
+    // when the flag is off or when setAccess() hasn't been called).
     if (flags.getEnableCtxExports()) {
       if (flags.getEnableVersionApi()) {
         JSG_TS_OVERRIDE(<Props = unknown> {
