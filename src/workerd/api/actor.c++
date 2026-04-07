@@ -30,10 +30,9 @@ kj::Own<WorkerInterface> LocalActorOutgoingFactory::newSingleUseClient(
     }
 
     return KJ_REQUIRE_NONNULL(actorChannel)
-        ->startRequest(
-            {.cfBlobJson = kj::mv(cfStr),
-             .parentSpan = tracing.getInternalSpanParent(),
-             .userSpanContext = context.getUserSpanContext(tracing)});
+        ->startRequest({.cfBlobJson = kj::mv(cfStr),
+          .parentSpan = tracing.getInternalSpanParent(),
+          .userSpanContext = context.getUserSpanContext(tracing)});
   },
       {.inHouse = true,
         .wrapMetrics = true,
@@ -64,10 +63,9 @@ kj::Own<WorkerInterface> GlobalActorOutgoingFactory::newSingleUseClient(
     }
 
     return KJ_REQUIRE_NONNULL(actorChannel)
-        ->startRequest(
-            {.cfBlobJson = kj::mv(cfStr),
-             .parentSpan = tracing.getInternalSpanParent(),
-             .userSpanContext = context.getUserSpanContext(tracing)});
+        ->startRequest({.cfBlobJson = kj::mv(cfStr),
+          .parentSpan = tracing.getInternalSpanParent(),
+          .userSpanContext = context.getUserSpanContext(tracing)});
   },
       {.inHouse = true,
         .wrapMetrics = true,
@@ -84,10 +82,9 @@ kj::Own<WorkerInterface> ReplicaActorOutgoingFactory::newSingleUseClient(
 
     // Unlike in `GlobalActorOutgoingFactory`, we do not create this lazily, since our channel was
     // already open prior to this DO starting up.
-    return actorChannel->startRequest(
-        {.cfBlobJson = kj::mv(cfStr),
-         .parentSpan = tracing.getInternalSpanParent(),
-         .userSpanContext = context.getUserSpanContext(tracing)});
+    return actorChannel->startRequest({.cfBlobJson = kj::mv(cfStr),
+      .parentSpan = tracing.getInternalSpanParent(),
+      .userSpanContext = context.getUserSpanContext(tracing)});
   },
       {.inHouse = true,
         .wrapMetrics = true,
