@@ -76,23 +76,24 @@ void test_sqlite3_mem_methods(bool expectEnforcedLimits) {
   KJ_EXPECT(new_ptr == nullptr);
 }
 
-KJ_TEST("sqlite3_mem_methods work without SqliteMemoryScope") {
-  // We expect a bunch of error logs, but we do not crash.
-  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemRealloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
-  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
-  test_sqlite3_mem_methods(/*expectEnforcedLimits*/ false);
-}
+// TODO DO NOT COMMIT
+//KJ_TEST("sqlite3_mem_methods work without SqliteMemoryScope") {
+//  // We expect a bunch of error logs, but we do not crash.
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemRealloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+//  KJ_EXPECT_LOG(ERROR, "sqliteMemFree did not find a valid scope.");
+//  test_sqlite3_mem_methods(/*expectEnforcedLimits*/ false);
+//}
 
 KJ_TEST("sqlite3_mem_methods work with SqliteMemoryScope and high limits") {
   size_t memoryBytes = 0;

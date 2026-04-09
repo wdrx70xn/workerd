@@ -4,6 +4,7 @@
 
 #include "sqlite-metering.h"
 
+#include <workerd/util/sentry.h>
 #include <sqlite3.h>
 #include <stdlib.h>
 
@@ -47,7 +48,9 @@ void* sqliteMemMalloc(int size) {
     // This branch is a defensive measure, if we have custom sqlite3_mem_methods installed, and we
     // must to hit this branch, then scope should not be a nullptr. If we see this, then something
     // is wrong with our memory metering.
-    KJ_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+    // TODO DO NOT COMMIT
+    //KJ_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
+    DEBUG_FATAL_RELEASE_LOG(ERROR, "sqliteMemMalloc did not find a valid scope.");
   }
 
   void* ptr = malloc(static_cast<size_t>(size));

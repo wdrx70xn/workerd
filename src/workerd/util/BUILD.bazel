@@ -222,6 +222,8 @@ wd_cc_library(
     hdrs = ["sqlite-metering.h"],
     implementation_deps = [
         "@sqlite3",
+        # TODO DO NOT COMMIT
+        "//src/workerd/util:sentry",
     ],
     visibility = ["//visibility:public"],
     deps = [
