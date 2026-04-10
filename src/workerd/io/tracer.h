@@ -79,9 +79,9 @@ class BaseTracer: public kj::Refcounted {
   // be available afterwards.
   virtual void recordTimestamp(kj::Date timestamp) = 0;
 
-  SpanParent makeUserRequestSpan(tracing::TraceId traceId);
+  SpanParent makeUserRequestSpan(tracing::TraceId traceId, kj::Maybe<uint8_t> traceFlags);
 
-  using MakeUserRequestSpanFunc = kj::Function<SpanParent(tracing::TraceId)>;
+  using MakeUserRequestSpanFunc = kj::Function<SpanParent(tracing::TraceId, kj::Maybe<uint8_t>)>;
 
   // Allow setting the user request span after the tracer has been created so its observer can
   // reference the tracer. This can only be set once.
@@ -227,19 +227,25 @@ class UserSpanObserver final: public SpanObserver {
         spanId(tracing::SpanId::nullId),
         parentSpanId(tracing::SpanId::nullId),
         traceId(nullptr) {}
-  // constructor for top-level observer with trace ID
-  UserSpanObserver(kj::Own<SpanSubmitter> submitter, tracing::TraceId traceId)
+  // constructor for top-level observer with trace ID and optional trace flags
+  UserSpanObserver(kj::Own<SpanSubmitter> submitter,
+      tracing::TraceId traceId,
+      kj::Maybe<uint8_t> traceFlags = kj::none)
       : submitter(kj::mv(submitter)),
         spanId(tracing::SpanId::nullId),
         parentSpanId(tracing::SpanId::nullId),
-        traceId(kj::mv(traceId)) {}
+        traceId(kj::mv(traceId)),
+        traceFlags(traceFlags) {}
   // constructor for subsequent observers attached to a span
-  UserSpanObserver(
-      kj::Own<SpanSubmitter> submitter, tracing::SpanId parentSpanId, tracing::TraceId traceId)
+  UserSpanObserver(kj::Own<SpanSubmitter> submitter,
+      tracing::SpanId parentSpanId,
+      tracing::TraceId traceId,
+      kj::Maybe<uint8_t> traceFlags)
       : submitter(kj::mv(submitter)),
         spanId(this->submitter->makeSpanId()),
         parentSpanId(parentSpanId),
-        traceId(kj::mv(traceId)) {}
+        traceId(kj::mv(traceId)),
+        traceFlags(traceFlags) {}
   KJ_DISALLOW_COPY(UserSpanObserver);
 
   kj::Own<SpanObserver> newChild() override;
@@ -259,6 +265,7 @@ class UserSpanObserver final: public SpanObserver {
   kj::Date startTime = kj::UNIX_EPOCH;
   // Allow the submitter to reject spans, causing them to not be reported.
   bool wasAccepted = true;
+  kj::Maybe<uint8_t> traceFlags;
 };
 
 }  // namespace workerd
