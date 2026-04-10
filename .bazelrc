@@ -351,6 +351,9 @@ build:windows --extra_execution_platforms=//:x64_windows-clang-cl
 # runner, query @local_config_cc//:all to find the correct name.
 build:windows_arm64 --extra_toolchains=@local_config_cc//:cc-toolchain-arm64_windows-clang-cl
 build:windows_arm64 --extra_execution_platforms=//:arm64_windows-clang-cl
+# clang-cl on ARM64 Windows doesn't auto-link compiler-rt builtins, causing undefined symbols
+# like __udivti3 (128-bit integer division). Link the builtins library explicitly.
+build:windows_arm64 --linkopt=clang_rt.builtins-aarch64.lib
 
 # The Windows fastbuild bazel configuration is broken in that it necessarily generates PDB debug
 # information while the Linux and macOS toolchains only compile with debug information in the dbg
