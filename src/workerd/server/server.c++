@@ -1915,7 +1915,8 @@ class Server::WorkerService final: public Service,
       AbortActorsCallback abortActorsCallback,
       kj::Maybe<kj::String> dockerPathParam,
       kj::Maybe<kj::String> containerEgressInterceptorImageParam,
-      bool isDynamic)
+      bool isDynamic,
+      kj::Maybe<kj::Function<void()>> abortIsolateCallback = kj::none)
       : channelTokenHandler(channelTokenHandler),
         serviceName(serviceName),
         threadContext(threadContext),
@@ -1929,7 +1930,8 @@ class Server::WorkerService final: public Service,
         abortActorsCallback(kj::mv(abortActorsCallback)),
         dockerPath(kj::mv(dockerPathParam)),
         containerEgressInterceptorImage(kj::mv(containerEgressInterceptorImageParam)),
-        isDynamic(isDynamic) {}
+        isDynamic(isDynamic),
+        abortIsolateCallback(kj::mv(abortIsolateCallback)) {}
 
   // Call immediately after the constructor to set up `actorNamespaces`. This can't happen during
   // the constructor itself since it sets up cyclic references, which will throw an exception if
@@ -3242,6 +3244,7 @@ class Server::WorkerService final: public Service,
   kj::Maybe<kj::String> dockerPath;
   kj::Maybe<kj::String> containerEgressInterceptorImage;
   bool isDynamic;
+  kj::Maybe<kj::Function<void()>> abortIsolateCallback;
 
   class ActorChannelImpl final: public IoChannelFactory::ActorChannel {
    public:
@@ -3455,14 +3458,28 @@ class Server::WorkerService final: public Service,
     abortActorsCallback(reason);
   }
 
-  // For now, in workerd just abort the process.
+  // For now, in workerd just abort the process for non-dynamic workers.
   void abortIsolate(kj::StringPtr reason) override {
-    if (reason == nullptr) {
-      KJ_LOG(FATAL, "abortIsolate() called, terminating process");
+    KJ_IF_SOME(cb, abortIsolateCallback) {
+      // This is a dynamic worker - terminate the isolate and remove it from the map.
+      if (reason == nullptr) {
+        KJ_LOG(WARNING, "abortIsolate() called on dynamic worker, terminating isolate");
+      } else {
+        KJ_LOG(WARNING, "abortIsolate() called on dynamic worker, terminating isolate", reason);
+      }
+      // Terminate execution on the isolate. Note: this must be done while holding
+      // the isolate lock, but since we're inside the isolate already and about to
+      // destroy the service, we rely on the Worker dtor to handle cleanup.
+      cb();
     } else {
-      KJ_LOG(FATAL, "abortIsolate() called, terminating process", reason);
+      // Non-dynamic worker - abort the process as before.
+      if (reason == nullptr) {
+        KJ_LOG(FATAL, "abortIsolate() called, terminating process");
+      } else {
+        KJ_LOG(FATAL, "abortIsolate() called, terminating process", reason);
+      }
+      ::abort();
     }
-    ::abort();
   }
 
   kj::Own<WorkerStubChannel> loadIsolate(uint loaderChannel,
@@ -4058,14 +4075,23 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         // may be used in error logs.
         auto isolateName = kj::str(namespaceName, ':', n);
 
+        // For named isolates, create a callback that removes this isolate from
+        // the map when abortIsolate() is called.
+        kj::Function<void()> abortCallback = [this, key = kj::str(n)]() mutable {
+          isolates.erase(key);
+        };
+
         return {.key = kj::mv(n),
-          .value = kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource))};
+          .value = kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource),
+              kj::mv(abortCallback))};
       })
           .addRef()
           .toOwn();
     } else {
+      // For anonymous isolates, there's no map entry to remove, so no callback needed.
       auto isolateName = kj::str(namespaceName, ":dynamic:", randomUUID(server.entropySource));
-      return kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource)).toOwn();
+      return kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource), kj::none)
+          .toOwn();
     }
   }
 
@@ -4102,8 +4128,11 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
    public:
     WorkerStubImpl(Server& server,
         kj::String isolateName,
-        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource)
-        : startupTask(start(server, kj::mv(isolateName), kj::mv(fetchSource)).fork()) {}
+        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource,
+        kj::Maybe<kj::Function<void()>> abortIsolateCallback)
+        : startupTask(
+              start(server, kj::mv(isolateName), kj::mv(fetchSource), kj::mv(abortIsolateCallback))
+                  .fork()) {}
 
     ~WorkerStubImpl() {
       unlink();
@@ -4131,7 +4160,8 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
 
     kj::Promise<void> start(Server& server,
         kj::String isolateName,
-        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) {
+        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource,
+        kj::Maybe<kj::Function<void()>> abortIsolateCallback) {
       auto source = co_await fetchSource();
       static const kj::HashMap<kj::String, ActorConfig> EMPTY_ACTOR_CONFIGS;
 
