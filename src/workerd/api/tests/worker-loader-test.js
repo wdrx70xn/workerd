@@ -946,26 +946,16 @@ export let abortIsolateDynamic = {
     let pingResult = await entrypoint.ping();
     assert.strictEqual(pingResult, 'pong');
 
-    // Now trigger abortIsolate - this should terminate the isolate
-    // but NOT crash the entire process
+    // Now trigger abortIsolate - this should terminate the isolate and remove
+    // the isolate from the map, not terminate the process
     console.log("hello!!!");
     await assert.rejects(
       () => entrypoint.crash(),
-      // The error message may vary, but it should be some kind of termination error
       (err) => {
-        console.log("hello!!!");
-        console.log(err.message);
-        // Accept any error related to script termination or disconnect
-        return (
-          err.message.includes('terminated') ||
-          err.message.includes('disconnect') ||
-          err.message.includes('aborted') ||
-          err.message.includes('Script execution')
-        );
+        return err.message.startsWith("internal error; reference =");
       }
     );
 
-    // After abortIsolate, the worker should be removed from the map.
     // If we fetch the same named worker again, it should create a fresh instance.
     let worker2 = env.loader.get('abort-test', () => {
       return {

@@ -1916,7 +1916,7 @@ class Server::WorkerService final: public Service,
       kj::Maybe<kj::String> dockerPathParam,
       kj::Maybe<kj::String> containerEgressInterceptorImageParam,
       bool isDynamic,
-      kj::Maybe<kj::Function<void()>> abortIsolateCallbackParam = kj::none)
+      kj::Maybe<kj::Function<void()>> abortIsolateCallback = kj::none)
       : channelTokenHandler(channelTokenHandler),
         serviceName(serviceName),
         threadContext(threadContext),
@@ -1931,7 +1931,7 @@ class Server::WorkerService final: public Service,
         dockerPath(kj::mv(dockerPathParam)),
         containerEgressInterceptorImage(kj::mv(containerEgressInterceptorImageParam)),
         isDynamic(isDynamic),
-        abortIsolateCallback(kj::mv(abortIsolateCallbackParam)) {
+        abortIsolateCallback(kj::mv(abortIsolateCallback)) {
   }
 
   // Call immediately after the constructor to set up `actorNamespaces`. This can't happen during
@@ -3462,18 +3462,16 @@ class Server::WorkerService final: public Service,
   // For now, in workerd just abort the process for non-dynamic workers.
   void abortIsolate(kj::StringPtr reason) override {
     KJ_IF_SOME(cb, abortIsolateCallback) {
-      // This is a dynamic worker - terminate the isolate and remove it from the map.
       if (reason == nullptr) {
         KJ_LOG(WARNING, "abortIsolate() called on dynamic worker, terminating isolate");
       } else {
         KJ_LOG(WARNING, "abortIsolate() called on dynamic worker, terminating isolate", reason);
       }
-      // Terminate execution on the isolate. Note: this must be done while holding
-      // the isolate lock, but since we're inside the isolate already and about to
-      // destroy the service, we rely on the Worker dtor to handle cleanup.
+      // Callback will terminate the isolate and remove worker from the dynamic
+      // isolates map.
       cb();
     } else {
-      // Non-dynamic worker - abort the process as before.
+      // Otherwise, abort the process.
       if (reason == nullptr) {
         KJ_LOG(FATAL, "abortIsolate() called, terminating process");
       } else {
