@@ -138,32 +138,18 @@ class WorkerQueue: public jsg::Object {
   jsg::Promise<Metrics> metrics(jsg::Lock& js, const jsg::TypeHandler<Metrics>& metricsHandler);
 
   JSG_RESOURCE_TYPE(WorkerQueue, CompatibilityFlags::Reader flags) {
-    if (flags.getWorkerdExperimental()) {
-      JSG_METHOD_NAMED(send, sendWithResponse);
-      JSG_METHOD_NAMED(sendBatch, sendBatchWithResponse);
-      JSG_METHOD(metrics);
-    } else {
-      JSG_METHOD(send);
-      JSG_METHOD(sendBatch);
-    }
+    JSG_METHOD(metrics);
+    JSG_METHOD_NAMED(send, sendWithResponse);
+    JSG_METHOD_NAMED(sendBatch, sendBatchWithResponse);
 
     JSG_TS_ROOT();
-    if (flags.getWorkerdExperimental()) {
-      JSG_TS_OVERRIDE(Queue<Body = unknown> {
-        send(message: Body, options?: QueueSendOptions): Promise<QueueSendResponse>;
-        sendBatch(messages
-                  : Iterable<MessageSendRequest<Body>>, options ?: QueueSendBatchOptions)
-            : Promise<QueueSendBatchResponse>;
-        metrics(): Promise<QueueMetrics>;
-      });
-    } else {
-      JSG_TS_OVERRIDE(Queue<Body = unknown> {
-        send(message: Body, options?: QueueSendOptions): Promise<void>;
-        sendBatch(messages
-                  : Iterable<MessageSendRequest<Body>>, options ?: QueueSendBatchOptions)
-            : Promise<void>;
-      });
-    }
+    JSG_TS_OVERRIDE(Queue<Body = unknown> {
+      send(message: Body, options?: QueueSendOptions): Promise<QueueSendResponse>;
+      sendBatch(messages
+                : Iterable<MessageSendRequest<Body>>, options ?: QueueSendBatchOptions)
+          : Promise<QueueSendBatchResponse>;
+      metrics(): Promise<QueueMetrics>;
+    });
     JSG_TS_DEFINE(type QueueContentType = "text" | "bytes" | "json" | "v8");
   }
 
@@ -339,24 +325,16 @@ class QueueEvent final: public ExtendableEvent {
     JSG_LAZY_READONLY_INSTANCE_PROPERTY(messages, getMessages);
     JSG_READONLY_INSTANCE_PROPERTY(queue, getQueueName);
 
-    if (flags.getWorkerdExperimental()) {
-      JSG_READONLY_INSTANCE_PROPERTY(metadata, getMetadata);
-    }
+    JSG_READONLY_INSTANCE_PROPERTY(metadata, getMetadata);
 
     JSG_METHOD(retryAll);
     JSG_METHOD(ackAll);
 
     JSG_TS_ROOT();
-    if (flags.getWorkerdExperimental()) {
-      JSG_TS_OVERRIDE(QueueEvent<Body = unknown> {
-          readonly messages: readonly Message<Body>[];
-          readonly metadata: MessageBatchMetadata;
-      });
-    } else {
-      JSG_TS_OVERRIDE(QueueEvent<Body = unknown> {
-          readonly messages: readonly Message<Body>[];
-      });
-    }
+    JSG_TS_OVERRIDE(QueueEvent<Body = unknown> {
+        readonly messages: readonly Message<Body>[];
+        readonly metadata: MessageBatchMetadata;
+    });
   }
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
@@ -422,24 +400,16 @@ class QueueController final: public jsg::Object {
     JSG_READONLY_INSTANCE_PROPERTY(messages, getMessages);
     JSG_READONLY_INSTANCE_PROPERTY(queue, getQueueName);
 
-    if (flags.getWorkerdExperimental()) {
-      JSG_READONLY_INSTANCE_PROPERTY(metadata, getMetadata);
-    }
+    JSG_READONLY_INSTANCE_PROPERTY(metadata, getMetadata);
 
     JSG_METHOD(retryAll);
     JSG_METHOD(ackAll);
 
     JSG_TS_ROOT();
-    if (flags.getWorkerdExperimental()) {
-      JSG_TS_OVERRIDE(MessageBatch<Body = unknown> {
-        readonly messages: readonly Message<Body>[];
-        readonly metadata: MessageBatchMetadata;
-      });
-    } else {
-      JSG_TS_OVERRIDE(MessageBatch<Body = unknown> {
-        readonly messages: readonly Message<Body>[];
-      });
-    }
+    JSG_TS_OVERRIDE(MessageBatch<Body = unknown> {
+      readonly messages: readonly Message<Body>[];
+      readonly metadata: MessageBatchMetadata;
+    });
   }
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {

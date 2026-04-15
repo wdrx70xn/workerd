@@ -32,6 +32,7 @@
 #include <workerd/server/actor-id-impl.h>
 #include <workerd/server/facet-tree-index.h>
 #include <workerd/server/fallback-service.h>
+#include <workerd/util/exception.h>
 #include <workerd/util/http-util.h>
 #include <workerd/util/mimetype.h>
 #include <workerd/util/stream-utils.h>
@@ -1602,8 +1603,19 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
     return worker;
   }
 
-  void reportFailure(const kj::Exception& exception, FailureSource source) override {
-    outcome = EventOutcome::EXCEPTION;
+  void reportFailure(
+      const kj::Exception& exception, FailureSource source = FailureSource::OTHER) override {
+    // Handle all exception based outcomes that can appear in workerd.
+    if (exception.getDetail(CPU_LIMIT_DETAIL_ID) != kj::none) {
+      outcome = EventOutcome::EXCEEDED_CPU;
+    } else if (exception.getDetail(MEMORY_LIMIT_DETAIL_ID) != kj::none) {
+      outcome = EventOutcome::EXCEEDED_MEMORY;
+    } else if (source == RequestObserver::FailureSource::DEFERRED_PROXY &&
+        exception.getType() == kj::Exception::Type::DISCONNECTED) {
+      outcome = EventOutcome::RESPONSE_STREAM_DISCONNECTED;
+    } else {
+      outcome = EventOutcome::EXCEPTION;
+    }
   }
 
   void setOutcome(EventOutcome newOutcome) override {
@@ -1620,9 +1632,15 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
       SimpleResponseObserver responseWrapper(&fetchStatus, response);
       co_await KJ_ASSERT_NONNULL(inner).request(method, url, headers, requestBody, responseWrapper);
     } catch (...) {
-      fetchStatus = 500;
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      // Overloaded-type exceptions generally represent some resource exhaustion (i.e. not
+      // necessarily an internal error) and correspond to HTTP error 503.
+      if (exception.getType() == kj::Exception::Type::OVERLOADED) {
+        fetchStatus = 503;
+      } else {
+        fetchStatus = 500;
+      }
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
   }
@@ -1637,7 +1655,7 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
           host, headers, connection, response, settings);
     } catch (...) {
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
   }
@@ -1647,7 +1665,7 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
       co_return co_await KJ_ASSERT_NONNULL(inner).prewarm(url);
     } catch (...) {
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
   }
@@ -1657,7 +1675,7 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
       co_return co_await KJ_ASSERT_NONNULL(inner).runScheduled(scheduledTime, cron);
     } catch (...) {
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
   }
@@ -1667,7 +1685,7 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
       co_return co_await KJ_ASSERT_NONNULL(inner).runAlarm(scheduledTime, retryCount);
     } catch (...) {
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
   }
@@ -1677,7 +1695,7 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
       co_return co_await KJ_ASSERT_NONNULL(inner).test();
     } catch (...) {
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
   }
@@ -1687,9 +1705,13 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
       co_return co_await KJ_ASSERT_NONNULL(inner).customEvent(kj::mv(event));
     } catch (...) {
       auto exception = kj::getCaughtExceptionAsKj();
-      reportFailure(exception, FailureSource::OTHER);
+      reportFailure(exception);
       kj::throwFatalException(kj::mv(exception));
     }
+  }
+
+  kj::Promise<kj::Maybe<kj::Date>> abandonAlarm(kj::Date scheduledTime) override {
+    co_return co_await KJ_ASSERT_NONNULL(inner).abandonAlarm(scheduledTime);
   }
 
  private:
@@ -3568,6 +3590,9 @@ class Server::WorkerService final: public Service,
   kj::Duration consumeTimeElapsedForPeriodicLogging() override {
     return 0 * kj::SECONDS;
   }
+  size_t getSqliteMemoryUsage() const override {
+    return 0;
+  }
 };
 
 struct FutureSubrequestChannel {
@@ -4135,12 +4160,12 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
     }
 
     kj::Own<IoChannelFactory::SubrequestChannel> getEntrypoint(
-        kj::Maybe<kj::String> name, Frankenvalue props) override {
+        kj::Maybe<kj::String> name, Frankenvalue props, kj::Maybe<ResourceLimits> limits) override {
       return kj::refcounted<SubrequestChannelImpl>(addRefToThis(), kj::mv(name), kj::mv(props));
     }
 
     kj::Own<IoChannelFactory::ActorClassChannel> getActorClass(
-        kj::Maybe<kj::String> name, Frankenvalue props) override {
+        kj::Maybe<kj::String> name, Frankenvalue props, kj::Maybe<ResourceLimits> limits) override {
       return kj::refcounted<ActorClassImpl>(addRefToThis(), kj::mv(name), kj::mv(props));
     }
 
@@ -4250,9 +4275,12 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
       kj::Own<WorkerInterface> startRequest(
           IoChannelFactory::SubrequestMetadata metadata) override {
         if (isolate->service == kj::none) {
-          return newPromisedWorkerInterface(
-              isolate->startupTask.addBranch().then([this, metadata = kj::mv(metadata)]() mutable {
-            return startRequestImpl(kj::mv(metadata));
+          // Capture a refcounted reference rather than a raw `this` pointer so that the
+          // SubrequestChannelImpl is kept alive until the startup task resolves, even if the
+          // owning Fetcher is garbage-collected while the deferred promise is pending.
+          return newPromisedWorkerInterface(isolate->startupTask.addBranch().then(
+              [self = kj::addRef(*this), metadata = kj::mv(metadata)]() mutable {
+            return self->startRequestImpl(kj::mv(metadata));
           }));
         } else {
           return startRequestImpl(kj::mv(metadata));
@@ -4276,7 +4304,17 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
           entrypointService = service->getEntrypoint(entrypointName, kj::mv(props));
         }
         KJ_IF_SOME(ep, entrypointService) {
-          return ep->startRequest(kj::mv(metadata));
+          // Attach a refcounted reference to `this` (SubrequestChannelImpl) to the returned
+          // WorkerInterface. This keeps the SubrequestChannelImpl alive for the duration of
+          // the request, which in turn keeps the WorkerStubImpl alive (via Rc), preventing
+          // WorkerStubImpl::unlink() from destroying the WorkerService's I/O channels while
+          // the request's IoContext still holds raw pointers to the WorkerService.
+          //
+          // Without this, if the JS Fetcher object is garbage-collected mid-request (e.g.
+          // because it was a temporary expression), the SubrequestChannelImpl is destroyed,
+          // the WorkerStubImpl refcount drops to zero, unlink() clears the WorkerService's
+          // LinkedIoChannels, and the child worker's IoContext crashes accessing them.
+          return ep->startRequest(kj::mv(metadata)).attach(kj::addRef(*this));
         } else {
           KJ_IF_SOME(en, entrypointName) {
             JSG_FAIL_REQUIRE(Error, "Worker has no such entrypoint: ", en);
@@ -4307,11 +4345,13 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
           return kj::none;
         }
 
-        // Have to wait for the isolate to start up.
-        return isolate->startupTask.addBranch().then([this]() {
-          if (inner == kj::none) {
-            inner =
-                KJ_ASSERT_NONNULL(isolate->service)->getActorClass(entrypointName, kj::mv(props));
+        // Have to wait for the isolate to start up. Capture a refcounted reference rather than
+        // a raw `this` pointer so that the ActorClassImpl stays alive until the startup task
+        // resolves, even if the owning object is garbage-collected while waiting.
+        return isolate->startupTask.addBranch().then([self = kj::addRef(*this)]() mutable {
+          if (self->inner == kj::none) {
+            self->inner = KJ_ASSERT_NONNULL(self->isolate->service)
+                              ->getActorClass(self->entrypointName, kj::mv(self->props));
           }
         });
       }
@@ -5485,9 +5525,9 @@ class Server::DebugPortListener {
       auto serviceName = params.getService();
       auto propsReader = params.getProps();
 
-      // Look up the service
-      auto& serviceEntry =
-          KJ_ASSERT_NONNULL(srv.services.find(serviceName), "Service not found", serviceName);
+      // Look up the service.
+      auto& serviceEntry = KJ_ASSERT_NONNULL(srv.services.find(serviceName),
+          kj::str("jsg.Error: Worker \"", serviceName, "\" not found"));
       auto service = serviceEntry->service();
 
       // Convert props from Frankenvalue if provided
@@ -5509,11 +5549,11 @@ class Server::DebugPortListener {
 
         targetService =
             KJ_ASSERT_NONNULL(workerService->getEntrypoint(maybeEntrypoint, kj::mv(props)),
-                "Entrypoint not found", maybeEntrypoint.orDefault("(default)"));
+                kj::str("jsg.Error: Worker does not export an entrypoint named \"",
+                    maybeEntrypoint.orDefault("(default)"), "\""));
       } else {
         // Not a WorkerService
-        KJ_ASSERT(
-            !params.hasEntrypoint(), "Service does not support named entrypoints", serviceName);
+        KJ_ASSERT(!params.hasEntrypoint(), "jsg.Error: Worker does not support named entrypoints");
 
         // Try to apply props if the service supports it
         if (params.hasProps()) {
@@ -5538,17 +5578,18 @@ class Server::DebugPortListener {
       auto actorIdStr = params.getActorId();
 
       // Look up the service
-      auto& serviceEntry =
-          KJ_ASSERT_NONNULL(srv.services.find(serviceName), "Service not found", serviceName);
+      auto& serviceEntry = KJ_ASSERT_NONNULL(srv.services.find(serviceName),
+          kj::str("jsg.Error: Worker \"", serviceName, "\" not found"));
       auto service = serviceEntry->service();
 
       // Try to cast to WorkerService
       auto* workerService = dynamic_cast<WorkerService*>(service);
-      KJ_REQUIRE(workerService != nullptr, "Service does not support actors", serviceName);
+      KJ_REQUIRE(workerService != nullptr, "jsg.Error: Worker does not support Durable Objects");
 
       // Look up the actor namespace
       auto& actorNamespace = KJ_ASSERT_NONNULL(workerService->getActorNamespace(entrypointName),
-          "Actor namespace not found", entrypointName);
+          kj::str("jsg.Error: Worker does not export a Durable Object class named \"",
+              entrypointName, "\""));
 
       // Create an actor ID - use the namespace config to determine if it's durable or ephemeral
       Worker::Actor::Id actorId;

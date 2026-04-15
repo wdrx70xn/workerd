@@ -23,21 +23,14 @@ export default {
   },
 
   async test(ctrl, env, ctx) {
-    const metricsEnabled = env.METRICS_FLAG;
-    if (metricsEnabled) {
-      // Flag ON → metrics() should exist and return data
-      assert.strictEqual(typeof env.QUEUE.metrics, 'function');
-      const metrics = await env.QUEUE.metrics();
-      assert.strictEqual(metrics.backlogCount, 100);
-      assert.strictEqual(metrics.backlogBytes, 2048);
-      assert.ok(
-        metrics.oldestMessageTimestamp instanceof Date,
-        'Expected oldestMessageTimestamp to be a Date'
-      );
-      assert.strictEqual(metrics.oldestMessageTimestamp.getTime(), 1000000);
-    } else {
-      // Flag OFF → metrics() should not be exposed on the binding
-      assert.strictEqual(typeof env.QUEUE.metrics, 'undefined');
-    }
+    assert.strictEqual(typeof env.QUEUE.metrics, 'function');
+    const metrics = await env.QUEUE.metrics();
+    assert.strictEqual(metrics.backlogCount, 100);
+    assert.strictEqual(metrics.backlogBytes, 2048);
+    assert.ok(
+      metrics.oldestMessageTimestamp instanceof Date,
+      'Expected oldestMessageTimestamp to be a Date'
+    );
+    assert.strictEqual(metrics.oldestMessageTimestamp.getTime(), 1000000);
   },
 };

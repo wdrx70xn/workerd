@@ -46,38 +46,31 @@ export default {
   },
 
   async test(ctrl, env) {
-    const responseBodyEnabled = env.RESPONSE_BODY_FLAG;
-
     const sendResult = await env.QUEUE.send('abc', { contentType: 'text' });
     const sendBatchResult = await env.QUEUE.sendBatch([
       { body: 'def', contentType: 'text' },
     ]);
 
-    if (responseBodyEnabled) {
-      assert.strictEqual(sendResult.metadata.metrics.backlogCount, 100);
-      assert.strictEqual(sendResult.metadata.metrics.backlogBytes, 2048);
-      assert.ok(
-        sendResult.metadata.metrics.oldestMessageTimestamp instanceof Date,
-        'Expected oldestMessageTimestamp to be a Date'
-      );
-      assert.strictEqual(
-        sendResult.metadata.metrics.oldestMessageTimestamp.getTime(),
-        1000000
-      );
+    assert.strictEqual(sendResult.metadata.metrics.backlogCount, 100);
+    assert.strictEqual(sendResult.metadata.metrics.backlogBytes, 2048);
+    assert.ok(
+      sendResult.metadata.metrics.oldestMessageTimestamp instanceof Date,
+      'Expected oldestMessageTimestamp to be a Date'
+    );
+    assert.strictEqual(
+      sendResult.metadata.metrics.oldestMessageTimestamp.getTime(),
+      1000000
+    );
 
-      assert.strictEqual(sendBatchResult.metadata.metrics.backlogCount, 200);
-      assert.strictEqual(sendBatchResult.metadata.metrics.backlogBytes, 4096);
-      assert.ok(
-        sendBatchResult.metadata.metrics.oldestMessageTimestamp instanceof Date,
-        'Expected oldestMessageTimestamp to be a Date'
-      );
-      assert.strictEqual(
-        sendBatchResult.metadata.metrics.oldestMessageTimestamp.getTime(),
-        2000000
-      );
-    } else {
-      assert.strictEqual(sendResult, undefined);
-      assert.strictEqual(sendBatchResult, undefined);
-    }
+    assert.strictEqual(sendBatchResult.metadata.metrics.backlogCount, 200);
+    assert.strictEqual(sendBatchResult.metadata.metrics.backlogBytes, 4096);
+    assert.ok(
+      sendBatchResult.metadata.metrics.oldestMessageTimestamp instanceof Date,
+      'Expected oldestMessageTimestamp to be a Date'
+    );
+    assert.strictEqual(
+      sendBatchResult.metadata.metrics.oldestMessageTimestamp.getTime(),
+      2000000
+    );
   },
 };

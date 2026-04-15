@@ -10,7 +10,7 @@ const unitTests :Workerd.Config = (
         bindings = [
           ( name = "QUEUE", queue = "queue-metrics-sentinel-test" ),
         ],
-        compatibilityFlags = ["nodejs_compat", "queues_json_messages", "experimental", "capture_async_api_throws"],
+        compatibilityFlags = ["nodejs_compat", "queues_json_messages", "capture_async_api_throws"],
       )
     ),
   ],

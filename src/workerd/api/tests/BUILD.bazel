@@ -64,6 +64,7 @@ wd_test(
         "tail-worker-test-receiver.js",
         "tail-worker-test-dummy.js",
         "tail-worker-test-invalid.js",
+        "tail-worker-test-no-op.js",
         "tail-worker-test-jsrpc.js",
         "websocket-hibernation.js",
         "connect-handler-test.js",
@@ -264,6 +265,12 @@ wd_test(
     src = "blob-test.wd-test",
     args = ["--experimental"],
     data = ["blob-test.js"],
+)
+
+wd_test(
+    src = "response-uaf-test.wd-test",
+    args = ["--experimental"],
+    data = ["response-uaf-test.js"],
 )
 
 wd_test(

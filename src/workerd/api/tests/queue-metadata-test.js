@@ -6,16 +6,6 @@ import assert from 'node:assert';
 
 export default {
   async queue(batch, env, ctx) {
-    const flagEnabled = env.METADATA_FLAG;
-
-    if (!flagEnabled) {
-      // Flag disabled → metadata property should not exist
-      assert.strictEqual(batch.metadata, undefined);
-      batch.ackAll();
-      return;
-    }
-
-    // Flag enabled → metadata should always be present
     assert.ok(batch.metadata, 'Expected batch.metadata to be defined');
     assert.ok(
       batch.metadata.metrics,
@@ -47,37 +37,27 @@ export default {
   },
 
   async test(ctrl, env, ctx) {
-    const flagEnabled = env.METADATA_FLAG;
     const timestamp = new Date();
 
-    if (flagEnabled) {
-      const response1 = await env.SERVICE.queue(
-        'test-queue',
-        [{ id: '0', timestamp, body: 'hello', attempts: 1 }],
-        {
-          metrics: {
-            backlogCount: 100,
-            backlogBytes: 2048,
-            oldestMessageTimestamp: 1000000,
-          },
-        }
-      );
-      assert.strictEqual(response1.outcome, 'ok');
-      assert(response1.ackAll);
+    const response1 = await env.SERVICE.queue(
+      'test-queue',
+      [{ id: '0', timestamp, body: 'hello', attempts: 1 }],
+      {
+        metrics: {
+          backlogCount: 100,
+          backlogBytes: 2048,
+          oldestMessageTimestamp: 1000000,
+        },
+      }
+    );
+    assert.strictEqual(response1.outcome, 'ok');
+    assert(response1.ackAll);
 
-      // Test with omitted metadata
-      const response2 = await env.SERVICE.queue('test-queue', [
-        { id: '1', timestamp, body: 'world', attempts: 1 },
-      ]);
-      assert.strictEqual(response2.outcome, 'ok');
-      assert(response2.ackAll);
-    } else {
-      // Flag disabled → handler still works, metadata not visible
-      const response = await env.SERVICE.queue('test-queue', [
-        { id: '0', timestamp, body: 'foobar', attempts: 1 },
-      ]);
-      assert.strictEqual(response.outcome, 'ok');
-      assert(response.ackAll);
-    }
+    // Test with omitted metadata
+    const response2 = await env.SERVICE.queue('test-queue', [
+      { id: '1', timestamp, body: 'world', attempts: 1 },
+    ]);
+    assert.strictEqual(response2.outcome, 'ok');
+    assert(response2.ackAll);
   },
 };

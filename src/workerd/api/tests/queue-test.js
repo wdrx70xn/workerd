@@ -65,7 +65,15 @@ export default {
     } else {
       assert.fail(`Unexpected pathname: ${JSON.stringify(pathname)}`);
     }
-    return new Response();
+    return Response.json({
+      metadata: {
+        metrics: {
+          backlogCount: 0,
+          backlogBytes: 0,
+          oldestMessageTimestamp: 0,
+        },
+      },
+    });
   },
 
   // Consumer receiver (from `env.SERVICE`)

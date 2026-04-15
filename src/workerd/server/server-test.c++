@@ -1462,9 +1462,10 @@ KJ_TEST("Server: capability bindings") {
       .+hello)"_blockquote);
     subreq.send(R"(
       HTTP/1.1 200 OK
-      Content-Length: 2
+      Content-Type: application/json
+      Content-Length: 27
 
-      OK
+      {"metadata":{"metrics":{}}}
     )"_blockquote);
   }
 
@@ -5952,7 +5953,7 @@ KJ_TEST("Server: debug port RPC calls") {
   };
 
   // Test 1: Request a non-existent service should fail
-  KJ_EXPECT_THROW_MESSAGE("Service not found",
+  KJ_EXPECT_THROW_MESSAGE("Worker \"nonexistent\" not found",
       getBootstrap("nonexistent", kj::none, [](auto& props) { props.setEmptyObject(); }));
 
   // Test 2: Get entrypoint for different services
