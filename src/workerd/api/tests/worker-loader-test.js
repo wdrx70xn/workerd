@@ -948,13 +948,15 @@ export let abortIsolateDynamic = {
 
     // Now trigger abortIsolate - this should terminate the isolate and remove
     // the isolate from the map, not terminate the process
-    console.log("hello!!!");
     await assert.rejects(
       () => entrypoint.crash(),
       (err) => {
-        return err.message.startsWith("internal error; reference =");
+        return err.message.startsWith('internal error; reference =');
       }
     );
+
+    // The old entrypoint should no longer work (isolate is terminated)
+    await assert.rejects(() => entrypoint.ping());
 
     // If we fetch the same named worker again, it should create a fresh instance.
     let worker2 = env.loader.get('abort-test', () => {
@@ -978,5 +980,52 @@ export let abortIsolateDynamic = {
     let entrypoint2 = worker2.getEntrypoint('TestEntrypoint');
     let pingResult2 = await entrypoint2.ping();
     assert.strictEqual(pingResult2, 'pong from new instance');
+  },
+};
+
+// Test that abortIsolate() works correctly for anonymous dynamic workers.
+// Anonymous workers don't have a name and therefore don't need to be removed
+// from the loader's map (they're not stored in a map).
+export let abortIsolateDynamicAnonymous = {
+  async test(ctrl, env, ctx) {
+    // Create an anonymous dynamic worker (no name provided to get())
+    let worker = env.loader.get(null, () => {
+      return {
+        compatibilityDate: '2025-01-01',
+        mainModule: 'worker.js',
+        modules: {
+          'worker.js': `
+            import {WorkerEntrypoint, abortIsolate} from "cloudflare:workers";
+            export class TestEntrypoint extends WorkerEntrypoint {
+              async crash() {
+                abortIsolate('Anonymous dynamic worker abort test');
+              }
+              async ping() {
+                return 'pong';
+              }
+            }
+          `,
+        },
+      };
+    });
+
+    // First, verify the worker works normally
+    let entrypoint = worker.getEntrypoint('TestEntrypoint');
+    let pingResult = await entrypoint.ping();
+    assert.strictEqual(pingResult, 'pong');
+
+    // Now trigger abortIsolate - this should terminate the isolate
+    // but NOT crash the entire process
+    await assert.rejects(
+      () => entrypoint.crash(),
+      (err) => {
+        return err.message.startsWith('internal error; reference =');
+      }
+    );
+
+    // For anonymous workers, there's no map entry to remove, so we just
+    // verify that the abort worked without crashing the process.
+    // The original entrypoint should no longer work.
+    await assert.rejects(() => entrypoint.ping());
   },
 };

@@ -1931,8 +1931,7 @@ class Server::WorkerService final: public Service,
         dockerPath(kj::mv(dockerPathParam)),
         containerEgressInterceptorImage(kj::mv(containerEgressInterceptorImageParam)),
         isDynamic(isDynamic),
-        abortIsolateCallback(kj::mv(abortIsolateCallback)) {
-  }
+        abortIsolateCallback(kj::mv(abortIsolateCallback)) {}
 
   // Call immediately after the constructor to set up `actorNamespaces`. This can't happen during
   // the constructor itself since it sets up cyclic references, which will throw an exception if
@@ -4091,9 +4090,15 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
           .addRef()
           .toOwn();
     } else {
-      // For anonymous isolates, there's no map entry to remove, so no callback needed.
+      // For anonymous isolates, there's no map entry to remove, but we still need
+      // a callback to indicate this is a dynamic worker (so abortIsolate doesn't
+      // terminate the process).
       auto isolateName = kj::str(namespaceName, ":dynamic:", randomUUID(server.entropySource));
-      return kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource), kj::none)
+      kj::Function<void()> abortCallback = []() {
+        // Anonymous workers have no map entry to remove, so this is a no-op.
+      };
+      return kj::rc<WorkerStubImpl>(
+          server, kj::mv(isolateName), kj::mv(fetchSource), kj::mv(abortCallback))
           .toOwn();
     }
   }
