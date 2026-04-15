@@ -1916,7 +1916,7 @@ class Server::WorkerService final: public Service,
       kj::Maybe<kj::String> dockerPathParam,
       kj::Maybe<kj::String> containerEgressInterceptorImageParam,
       bool isDynamic,
-      kj::Maybe<kj::Function<void()>> abortIsolateCallback = kj::none)
+      kj::Maybe<kj::Function<void()>> abortIsolateCallbackParam = kj::none)
       : channelTokenHandler(channelTokenHandler),
         serviceName(serviceName),
         threadContext(threadContext),
@@ -1931,7 +1931,8 @@ class Server::WorkerService final: public Service,
         dockerPath(kj::mv(dockerPathParam)),
         containerEgressInterceptorImage(kj::mv(containerEgressInterceptorImageParam)),
         isDynamic(isDynamic),
-        abortIsolateCallback(kj::mv(abortIsolateCallback)) {}
+        abortIsolateCallback(kj::mv(abortIsolateCallbackParam)) {
+  }
 
   // Call immediately after the constructor to set up `actorNamespaces`. This can't happen during
   // the constructor itself since it sets up cyclic references, which will throw an exception if
@@ -4051,6 +4052,10 @@ struct Server::WorkerDef {
   // If the WorkerDef was created from a DymamicWorkerSource and that
   // source contains a clone of the source bundle, this will take ownership.
   kj::Maybe<kj::Own<void>> maybeOwnedSourceCode;
+
+  // Callback invoked when abortIsolate() is called. Used by dynamic workers to remove
+  // themselves from the loader's isolate map.
+  kj::Maybe<kj::Function<void()>> abortIsolateCallback;
 };
 
 class Server::WorkerLoaderNamespace: public kj::Refcounted {
@@ -4082,8 +4087,8 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         };
 
         return {.key = kj::mv(n),
-          .value = kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource),
-              kj::mv(abortCallback))};
+          .value = kj::rc<WorkerStubImpl>(
+              server, kj::mv(isolateName), kj::mv(fetchSource), kj::mv(abortCallback))};
       })
           .addRef()
           .toOwn();
@@ -4236,6 +4241,8 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         // ownership issues. For the downstream use, however, we need to be careful
         // to not copy the ownContent if it is an RPC response.
         .maybeOwnedSourceCode = kj::mv(source.ownContent),
+
+        .abortIsolateCallback = kj::mv(abortIsolateCallback),
         // clang-format on
       };
 
@@ -4712,6 +4719,9 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
     { auto drop = kj::mv(ctxExportsHandle); }
   });
 
+  // Extract abortIsolateCallback before moving def into linkCallback lambda
+  auto abortIsolateCallback = kj::mv(def.abortIsolateCallback);
+
   auto linkCallback = [this, def = kj::mv(def), totalActorChannels](WorkerService& workerService,
                           Worker::ValidationErrorReporter& errorReporter) mutable {
     WorkerService::LinkedIoChannels result{.alarmScheduler = *alarmScheduler};
@@ -4888,7 +4898,7 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
           monotonicClock, kj::mv(worker), kj::mv(errorReporter.defaultEntrypoint),
           kj::mv(errorReporter.namedEntrypoints), kj::mv(errorReporter.actorClasses),
           kj::mv(linkCallback), KJ_BIND_METHOD(*this, abortAllActors), kj::mv(dockerPath),
-          kj::mv(containerEgressInterceptorImage), def.isDynamic);
+          kj::mv(containerEgressInterceptorImage), def.isDynamic, kj::mv(abortIsolateCallback));
   result->initActorNamespaces(def.localActorConfigs, network);
   co_return result;
 }

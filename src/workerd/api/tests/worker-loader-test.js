@@ -913,3 +913,80 @@ export let justLoad = {
     }
   },
 };
+
+// Test that abortIsolate() works correctly for dynamic workers.
+// When abortIsolate() is called on a dynamic worker, it should:
+// 1. Terminate the isolate (not the entire process)
+// 2. Remove the worker from the loader's map so it can be reloaded
+export let abortIsolateDynamic = {
+  async test(ctrl, env, ctx) {
+    // Create a dynamic worker that calls abortIsolate
+    let worker = env.loader.get('abort-test', () => {
+      return {
+        compatibilityDate: '2025-01-01',
+        mainModule: 'worker.js',
+        modules: {
+          'worker.js': `
+            import {WorkerEntrypoint, abortIsolate} from "cloudflare:workers";
+            export class TestEntrypoint extends WorkerEntrypoint {
+              async crash() {
+                abortIsolate('Dynamic worker abort test');
+              }
+              async ping() {
+                return 'pong';
+              }
+            }
+          `,
+        },
+      };
+    });
+
+    // First, verify the worker works normally
+    let entrypoint = worker.getEntrypoint('TestEntrypoint');
+    let pingResult = await entrypoint.ping();
+    assert.strictEqual(pingResult, 'pong');
+
+    // Now trigger abortIsolate - this should terminate the isolate
+    // but NOT crash the entire process
+    console.log("hello!!!");
+    await assert.rejects(
+      () => entrypoint.crash(),
+      // The error message may vary, but it should be some kind of termination error
+      (err) => {
+        console.log("hello!!!");
+        console.log(err.message);
+        // Accept any error related to script termination or disconnect
+        return (
+          err.message.includes('terminated') ||
+          err.message.includes('disconnect') ||
+          err.message.includes('aborted') ||
+          err.message.includes('Script execution')
+        );
+      }
+    );
+
+    // After abortIsolate, the worker should be removed from the map.
+    // If we fetch the same named worker again, it should create a fresh instance.
+    let worker2 = env.loader.get('abort-test', () => {
+      return {
+        compatibilityDate: '2025-01-01',
+        mainModule: 'worker.js',
+        modules: {
+          'worker.js': `
+            import {WorkerEntrypoint} from "cloudflare:workers";
+            export class TestEntrypoint extends WorkerEntrypoint {
+              async ping() {
+                return 'pong from new instance';
+              }
+            }
+          `,
+        },
+      };
+    });
+
+    // The new worker should be functional
+    let entrypoint2 = worker2.getEntrypoint('TestEntrypoint');
+    let pingResult2 = await entrypoint2.ping();
+    assert.strictEqual(pingResult2, 'pong from new instance');
+  },
+};
