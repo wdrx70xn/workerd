@@ -238,6 +238,12 @@ Module.prototype._compile = function _compile(): void {
   // Acts as a no-op.
 };
 
+Object.defineProperty(Module.prototype, 'isPreloading', {
+  get() {
+    return false;
+  },
+});
+
 Object.defineProperties(Module, {
   register: {
     value: register,
