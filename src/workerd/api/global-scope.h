@@ -236,6 +236,29 @@ class CacheContext: public jsg::Object {
   }
 };
 
+// Base class for the ctx.access object providing Cloudflare Access authentication context.
+// Subclass when embedding to provide an implementation.
+class AccessContext: public jsg::Object {
+ public:
+  // Returns the audience claim from the Access JWT.
+  //
+  // The default implementation throws — only meaningful when overridden by the embedding.
+  virtual kj::StringPtr getAud();
+
+  // Fetches the full identity information for the authenticated user.
+  //
+  // The default implementation throws — only meaningful when overridden by the embedding.
+  virtual jsg::Promise<jsg::JsValue> getIdentity(jsg::Lock& js);
+
+  JSG_RESOURCE_TYPE(AccessContext) {
+    JSG_READONLY_INSTANCE_PROPERTY(aud, getAud);
+    JSG_METHOD(getIdentity);
+    JSG_TS_OVERRIDE(CloudflareAccessContext {
+      readonly aud: string;
+      getIdentity(): Promise<CloudflareAccessIdentity | undefined>;
+    });
+  }
+};
 class ExecutionContext: public jsg::Object {
  public:
   ExecutionContext(jsg::Lock& js, jsg::JsValue exports)
@@ -289,24 +312,9 @@ class ExecutionContext: public jsg::Object {
     return js.undefined();
   }
 
-  // Called by the host runtime (edgeworker) to set the Access context for this request.
-  // Must be called before the worker's handler is invoked.
-  //
-  // Unlike other ExecutionContext fields (props, version, exports) which are injected through the
-  // constructor, access uses a post-construction setter because the Access context is assembled by
-  // the host runtime after ExecutionContext construction but before handler invocation. The access
-  // data (audience claim, identity fetcher) originates from the Cloudflare Access integration
-  // pipeline and is not available during ExecutionContext construction in edgeworker.
-  void setAccess(jsg::Lock& js, jsg::JsRef<jsg::JsValue> value) {
-    access = kj::mv(value);
-  }
-
-  jsg::JsValue getAccess(jsg::Lock& js) {
-    KJ_IF_SOME(a, access) {
-      return a.getHandle(js);
-    }
-    return js.undefined();
-  }
+  // Returns an AccessContext for the current request, or empty jsg::Optional otherwise.
+  // Called by the runtime to provide Cloudflare Access authentication context.
+  jsg::Optional<jsg::Ref<AccessContext>> getAccess(jsg::Lock& js);
 
   JSG_RESOURCE_TYPE(ExecutionContext, CompatibilityFlags::Reader flags) {
     JSG_METHOD(waitUntil);
@@ -319,9 +327,7 @@ class ExecutionContext: public jsg::Object {
     if (flags.getEnableVersionApi()) {
       JSG_LAZY_INSTANCE_PROPERTY(version, getVersion);
     }
-    if (flags.getEnableCtxAccess()) {
-      JSG_LAZY_INSTANCE_PROPERTY(access, getAccess);
-    }
+    JSG_LAZY_INSTANCE_PROPERTY(access, getAccess);
 
     if (flags.getWorkerdExperimental()) {
       // TODO(soon): Before making this generally available we need to:
@@ -338,11 +344,6 @@ class ExecutionContext: public jsg::Object {
     }
 
     // TODO(soon): This is getting unwieldy.
-    // Note: `access` is included unconditionally in all TS_OVERRIDE branches (unlike `version`
-    // which is gated by enableVersionApi). This is intentional — adding another conditional would
-    // double the branch count (from 4 to 8). Since `access` is optional (`?`), the type is
-    // correct regardless of whether the flag is enabled (the property will be undefined at runtime
-    // when the flag is off or when setAccess() hasn't been called).
     if (flags.getEnableCtxExports()) {
       if (flags.getEnableVersionApi()) {
         JSG_TS_OVERRIDE(<Props = unknown> {
@@ -387,19 +388,16 @@ class ExecutionContext: public jsg::Object {
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
     tracker.trackField("props", props);
     tracker.trackField("version", version);
-    tracker.trackField("access", access);
   }
 
  private:
   jsg::JsRef<jsg::JsValue> exports;
   jsg::JsRef<jsg::JsValue> props;
   kj::Maybe<jsg::JsRef<jsg::JsValue>> version;
-  kj::Maybe<jsg::JsRef<jsg::JsValue>> access;
 
   void visitForGc(jsg::GcVisitor& visitor) {
     visitor.visit(props);
     visitor.visit(version);
-    visitor.visit(access);
   }
 };
 
@@ -1110,6 +1108,6 @@ class ServiceWorkerGlobalScope: public WorkerGlobalScope {
       api::ExecutionContext, api::ExportedHandler,                                                 \
       api::ServiceWorkerGlobalScope::StructuredCloneOptions, api::Navigator,                       \
       api::AlarmInvocationInfo, api::Immediate, api::Cloudflare, api::CachePurgeError,             \
-      api::CachePurgeResult, api::CachePurgeOptions, api::CacheContext
+      api::CachePurgeResult, api::CachePurgeOptions, api::CacheContext, api::AccessContext
 // The list of global-scope.h types that are added to worker.c++'s JSG_DECLARE_ISOLATE_TYPE
 }  // namespace workerd::api

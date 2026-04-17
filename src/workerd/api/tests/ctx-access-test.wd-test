@@ -7,7 +7,7 @@ const unitTests :Workerd.Config = (
         modules = [
           (name = "worker", esModule = embed "ctx-access-test.js")
         ],
-        compatibilityFlags = ["nodejs_compat", "experimental", "enable_ctx_access"],
+        compatibilityFlags = ["nodejs_compat"],
       )
     ),
   ],

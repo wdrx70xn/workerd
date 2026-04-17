@@ -34,24 +34,3 @@ interface CloudflareAccessIdentity extends Record<string, unknown> {
   /** True if the user is authenticated via Cloudflare Gateway. */
   is_gateway?: boolean;
 }
-
-/**
- * Cloudflare Access authentication information for the current request.
- */
-interface CloudflareAccessContext {
-  /**
-   * The audience claim from the Access JWT. This identifies which Access
-   * application the request matched.
-   */
-  readonly aud: string;
-
-  /**
-   * Fetches the full identity information for the authenticated user.
-   * This makes a call to the Access identity service to retrieve extended
-   * user information such as groups, device posture, and identity provider data.
-   *
-   * @returns The subject's identity, if one exists
-   * @throws May throw if the identity service is unreachable or returns an error.
-   */
-  getIdentity(): Promise<CloudflareAccessIdentity | undefined>;
-}

@@ -1508,13 +1508,4 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
     $compatDisableFlag("resizable_array_buffer_in_blob");
   # When enabled, creating a Blob with a resizable ArrayBuffer will throw a TypeError, matching
   # expected spec behavior.
-
-  enableCtxAccess @174 :Bool
-    $compatEnableFlag("enable_ctx_access")
-    $experimental;
-  # Enables the ctx.access property for Cloudflare Access integration.
-  # When enabled, ctx.access provides Access authentication context including the
-  # matched application audience (AUD) and an identity-fetching function. The value
-  # is set by the host runtime (edgeworker) per-request; in open-source workerd the
-  # property will always be undefined.
 }

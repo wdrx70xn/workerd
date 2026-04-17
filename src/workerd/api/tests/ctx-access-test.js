@@ -6,9 +6,9 @@ import { strictEqual } from 'node:assert';
 
 export const ctxAccessPropertyExists = {
   test(controller, env, ctx) {
-    // When enable_ctx_access is enabled, the property should exist on ctx
-    // (as a lazy instance property), even though its value is undefined
-    // because setAccess() is only called by the host runtime (edgeworker).
+    // The access property is always present on ctx as a lazy instance property.
+    // In standalone workerd (no embedding override), the value is undefined because
+    // the default Worker::Api::getCtxAccessProperty() returns kj::none.
     strictEqual('access' in ctx, true);
     strictEqual(ctx.access, undefined);
   },
