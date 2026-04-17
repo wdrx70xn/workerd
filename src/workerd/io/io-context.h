@@ -110,8 +110,7 @@ class IoContext_IncomingRequest final {
   // This method is also used by some custom event handlers (see WorkerInterface::CustomEvent) that
   // need similar behavior, as well as the test handler. TODO(cleanup): Rename to something more
   // generic?
-  enum class FinishScheduledResult { COMPLETED, ABORTED, TIMEOUT };
-  kj::Promise<FinishScheduledResult> finishScheduled();
+  kj::Promise<EventOutcome> finishScheduled();
 
   // Access the event loop's current time point. This will remain constant between ticks. This is
   // used to implement IoContext::now(), which should be preferred so that time can be adjusted

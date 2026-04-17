@@ -564,8 +564,35 @@ kj::Promise<void> IoContext::IncomingRequest::drain() {
       .exclusiveJoin(context->onAbort().catch_([](kj::Exception&&) {}));
 }
 
-kj::Promise<IoContext_IncomingRequest::FinishScheduledResult> IoContext::IncomingRequest::
-    finishScheduled() {
+// TODO
+constexpr kj::Exception::DetailTypeId SCRIPT_KILLED_DETAIL_ID = 0x0ull;
+constexpr kj::Exception::DetailTypeId INACTIVE_WEBSOCKETS_DETAIL_ID = 0x0ull;
+constexpr kj::Exception::DetailTypeId SCRIPT_NOT_FOUND_DETAIL_ID = 0x0ull;
+
+// TODO: Try to generalize this. Are all outcomes needed here?
+EventOutcome outcomeFromException(kj::Exception& e) {
+  if (e.getType() == kj::Exception::Type::OVERLOADED) {
+    if (e.getDetail(SCRIPT_KILLED_DETAIL_ID) != kj::none) {
+      return EventOutcome::KILL_SWITCH;
+    } else if (e.getDetail(MEMORY_LIMIT_DETAIL_ID) != kj::none) {
+      return EventOutcome::EXCEEDED_MEMORY;
+    } else if (e.getDetail(CPU_LIMIT_DETAIL_ID) != kj::none) {
+      return EventOutcome::EXCEEDED_CPU;
+    } else if (e.getDetail(INACTIVE_WEBSOCKETS_DETAIL_ID) != kj::none) {
+      return EventOutcome::LOAD_SHED;
+    } else {
+      // TODO(later): We have many overloaded exceptions that can't be described as killSwitch,
+      // exceededCpu or exceededMemory. Should there be a new outcome type for them?
+      return EventOutcome::EXCEPTION;
+    }
+  } else if (e.getDetail(SCRIPT_NOT_FOUND_DETAIL_ID) != kj::none) {
+    return EventOutcome::SCRIPT_NOT_FOUND;
+  } else {
+    return EventOutcome::EXCEPTION;
+  }
+}
+
+kj::Promise<EventOutcome> IoContext::IncomingRequest::finishScheduled() {
   // TODO(someday): In principle we should be able to support delivering the "scheduled" event type
   //   to an actor, and this may be important if we open up the whole of WorkerInterface to be
   //   callable from any stub. However, the logic around async tasks would have to be different. We
@@ -580,13 +607,22 @@ kj::Promise<IoContext_IncomingRequest::FinishScheduledResult> IoContext::Incomin
   context->incomingRequests.front().waitedForWaitUntil = true;
 
   auto timeoutPromise = context->limitEnforcer->limitScheduled().then(
-      [] { return IoContext_IncomingRequest::FinishScheduledResult::TIMEOUT; });
+      // TODO: I think there is a material difference between the scheduled limit being hit and
+      // actually hitting the CPU limit, we emit a NOSENTRY log for this case for queue events. How
+      // do we handle this best?
+      [] { return EventOutcome::EXCEEDED_CPU; });
   return context->waitUntilTasks.onEmpty()
-      .then([]() { return IoContext_IncomingRequest::FinishScheduledResult::COMPLETED; })
+      .then([]() { return EventOutcome::OK; })
       .exclusiveJoin(kj::mv(timeoutPromise))
       .exclusiveJoin(context->onAbort().then([] {
-    return IoContext_IncomingRequest::FinishScheduledResult::ABORTED;
-  }, [](kj::Exception&&) { return IoContext_IncomingRequest::FinishScheduledResult::ABORTED; }));
+    // abortFulfiller should only ever be rejected instead of being fulfilled, but return an
+    // exception outcome if it does happen
+    return EventOutcome::EXCEPTION;
+  }, [](kj::Exception&& e) {
+    // TODO: If we end up returning exception here, that's still a case that's hard to make sense of
+    return outcomeFromException(e);
+    // TODO: Just call reportFailure() here?
+  }));
 }
 
 class IoContext::PendingEvent: public kj::Refcounted {
