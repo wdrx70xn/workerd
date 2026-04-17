@@ -18,7 +18,10 @@ import {
   finishSetup,
 } from 'pyodide-internal:pool/builtin_wrappers';
 
-import { getSentinelImport } from 'pyodide-internal:pool/sentinel';
+import {
+  getSentinelImport,
+  getJsvErrorImport,
+} from 'pyodide-internal:pool/sentinel';
 
 /**
  * A preRun hook. Make sure environment variables are visible at runtime.
@@ -112,6 +115,7 @@ function getInstantiateWasm(
   pyodideWasmModule: WebAssembly.Module
 ): EmscriptenSettings['instantiateWasm'] {
   const sentinelImportPromise = getSentinelImport();
+  const jsvErrorImportPromise = getJsvErrorImport();
   return function instantiateWasm(
     wasmImports: WebAssembly.Imports,
     successCallback: (
@@ -120,8 +124,18 @@ function getInstantiateWasm(
     ) => void
   ): WebAssembly.Exports {
     (async function (): Promise<void> {
+      // Pyodide <= 0.28.2: sentinel imports live in their own WASM namespace
       wasmImports.sentinel = await sentinelImportPromise;
-      // Instantiate pyodideWasmModule with wasmImports
+      // Pyodide >= 314 (PR #6107): Jsv error imports moved to env namespace
+      const { Jsv_GetError_import, JsvError_Check } =
+        await jsvErrorImportPromise;
+      const env = wasmImports.env as
+        | Record<string, WebAssembly.ImportValue>
+        | undefined;
+      if (env) {
+        env.Jsv_GetError_import = Jsv_GetError_import;
+        env.JsvError_Check = JsvError_Check;
+      }
       const instance = await WebAssembly.instantiate(
         pyodideWasmModule,
         wasmImports
@@ -169,7 +183,15 @@ function getEmscriptenSettings(
       (res) => (config.resolveLockFilePromise = res)
     );
   }
-  const API = { config, lockFilePromise };
+  const API = {
+    config,
+    lockFilePromise,
+    runtimeEnv: {
+      IN_WORKERD: true,
+      IN_BROWSER: true,
+      IN_BROWSER_MAIN_THREAD: true,
+    },
+  };
   let resolveReadyPromise: (mod: Module) => void;
   let rejectReadyPromise: (e: any) => void = () => {};
   const readyPromise: Promise<Module> = new Promise((res, rej) => {

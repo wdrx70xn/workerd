@@ -37,14 +37,31 @@ function decodeBase64(input: string): Uint8Array {
   return output;
 }
 
-// This string is https://github.com/pyodide/pyodide/blob/main/src/core/sentinel.wat assembled and
-// hex encoded.
+// Pyodide <= 0.28.2: sentinel.wat with exports create_sentinel / is_sentinel
 const sentinelWasm = decodeBase64(
   'AGFzbQEAAAABDANfAGAAAW9gAW8BfwMDAgECByECD2NyZWF0ZV9zZW50aW5lbAAAC2lzX3NlbnRpbmVsAAEKEwIHAPsBAPsbCwkAIAD7GvsUAAs'
+);
+
+// Pyodide >= 314: jsverror.wat with exports Jsv_GetError_import / JsvError_Check
+// See https://github.com/pyodide/pyodide/pull/6107
+const jsvErrorWasm = decodeBase64(
+  'AGFzbQEAAAABDANfAGAAAW9gAW8BfwMDAgECBygCE0pzdl9HZXRFcnJvcl9pbXBvcnQAAA5Kc3ZFcnJvcl9DaGVjawABChMCBwD7AQD7GwsJACAA+xr7FAAL'
 );
 
 export async function getSentinelImport() {
   const module: WebAssembly.Module = new WebAssembly.Module(sentinelWasm);
   const instance = await WebAssembly.instantiate(module);
   return instance.exports;
+}
+
+export async function getJsvErrorImport(): Promise<{
+  Jsv_GetError_import: () => unknown;
+  JsvError_Check: (val: unknown) => number;
+}> {
+  const module: WebAssembly.Module = new WebAssembly.Module(jsvErrorWasm);
+  const instance = await WebAssembly.instantiate(module);
+  return instance.exports as {
+    Jsv_GetError_import: () => unknown;
+    JsvError_Check: (val: unknown) => number;
+  };
 }
