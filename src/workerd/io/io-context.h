@@ -49,6 +49,46 @@ WD_STRONG_BOOL(IoContext_Runnable_Exceptional);
 
 [[noreturn]] void throwExceededMemoryLimit(bool isActor);
 
+// A refcounted holder for the root user trace span of an IncomingRequest. This exists so that
+// references to the root user span held by the AsyncContextFrame async storage (via IoOwn, which
+// is kept alive by the IoContext's delete queue) do not extend the lifetime of the underlying
+// UserSpanObserver - which holds a kj::Own<BaseTracer> through its span submitter.
+//
+// The IncomingRequest owns the sole strong reference to the contained SpanParent; other holders
+// observe it via a kj::Own<UserTraceSpanHolder> but cannot prevent the span from being cleared
+// when the IncomingRequest is destroyed. This is critical because the BaseTracer's destructor
+// is responsible for emitting the final "outcome" tail event, and the tracer must be destroyed
+// at end-of-request - not when the IoContext is eventually destroyed (which for actors may be
+// much later, potentially at actor shutdown).
+class UserTraceSpanHolder final: public kj::Refcounted {
+ public:
+  UserTraceSpanHolder() = default;
+  KJ_DISALLOW_COPY_AND_MOVE(UserTraceSpanHolder);
+
+  // Returns a new SpanParent wrapping the same underlying observer as the held span, or
+  // SpanParent(nullptr) if the span has been cleared (because the owning IncomingRequest died).
+  SpanParent getSpan() {
+    KJ_IF_SOME(s, span) {
+      return s.addRef();
+    }
+    return SpanParent(nullptr);
+  }
+
+  // Sets the held span. Called exactly once by the owning IncomingRequest during delivered().
+  void setSpan(SpanParent newSpan) {
+    span = kj::mv(newSpan);
+  }
+
+  // Clears the held span, releasing the underlying UserSpanObserver (and with it the tracer ref).
+  // Called by the owning IncomingRequest destructor.
+  void clear() {
+    span = kj::none;
+  }
+
+ private:
+  kj::Maybe<SpanParent> span;
+};
+
 class IoContext;
 
 // Represents one incoming request being handled by a IoContext. In non-actor scenarios,
@@ -126,7 +166,17 @@ class IoContext_IncomingRequest final {
     return workerTracer;
   }
 
-  SpanParent getCurrentUserTraceSpan();
+  // Returns the root user trace span for this incoming request, if any.
+  SpanParent getRootUserTraceSpan() {
+    return userTraceSpanHolder->getSpan();
+  }
+
+  // Returns a new reference to the root user trace span holder. The holder remains valid even
+  // after this IncomingRequest is destroyed, but its contained span is cleared at that time,
+  // so lookups via getSpan() will return SpanParent(nullptr).
+  kj::Own<UserTraceSpanHolder> getRootUserTraceSpanHolder() {
+    return kj::addRef(*userTraceSpanHolder);
+  }
 
   // The invocation span context is a unique identifier for a specific
   // worker invocation.
@@ -138,7 +188,12 @@ class IoContext_IncomingRequest final {
   kj::Maybe<kj::Own<BaseTracer>> workerTracer;
   kj::Own<IoChannelFactory> ioChannelFactory;
 
-  SpanParent currentUserTraceSpan = nullptr;
+  // Holder for the root user trace span. Other references (e.g. from AsyncContextFrame storage
+  // via IoOwn) may observe this holder, but only the IncomingRequest controls its contents - on
+  // destruction, the IncomingRequest clears the holder so that the contained UserSpanObserver
+  // (and its tracer reference) is released promptly at end-of-request, even if other references
+  // to the holder outlive the IncomingRequest.
+  kj::Own<UserTraceSpanHolder> userTraceSpanHolder = kj::refcounted<UserTraceSpanHolder>();
 
   // The invocation span context identifies the trace id, invocation id, and root
   // span for the current request. Every invocation of a worker function always
@@ -223,6 +278,22 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   kj::Maybe<BaseTracer&> getWorkerTracer() {
     if (incomingRequests.empty()) return kj::none;
     return getCurrentIncomingRequest().getWorkerTracer();
+  }
+
+  // Returns the root user trace span for the current incoming request, if any.
+  SpanParent getRootUserTraceSpan() {
+    if (incomingRequests.empty()) return SpanParent(nullptr);
+    return getCurrentIncomingRequest().getRootUserTraceSpan();
+  }
+
+  // Returns a refcounted holder of the current incoming request's root user trace span. Unlike
+  // getRootUserTraceSpan(), this does not return the span directly - the holder can be safely
+  // stored in long-lived structures (e.g. async context storage via IoOwn) without extending
+  // the lifetime of the underlying UserSpanObserver, because the IncomingRequest will clear the
+  // holder's contents when the request ends.
+  kj::Maybe<kj::Own<UserTraceSpanHolder>> getRootUserTraceSpanHolder() {
+    if (incomingRequests.empty()) return kj::none;
+    return getCurrentIncomingRequest().getRootUserTraceSpanHolder();
   }
 
   LimitEnforcer& getLimitEnforcer() {
@@ -878,6 +949,18 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   // given trace span, or the current request's trace span, if no span is given.
   jsg::AsyncContextFrame::StorageScope makeAsyncTraceScope(
       Worker::Lock& lock, kj::Maybe<SpanParent> spanParent = kj::none) KJ_WARN_UNUSED_RESULT;
+
+  // Returns an object that ensures an async JS operation started in the current scope captures
+  // the given user trace span holder. If no holder is given, uses the current incoming request's
+  // root user trace span holder (if any), matching the behavior of makeAsyncTraceScope.
+  //
+  // Note: this takes a kj::Own<UserTraceSpanHolder> rather than a SpanParent directly. The
+  // holder indirection is necessary so that storing a reference in the AsyncContextFrame (which
+  // for actors outlives individual requests via the IoContext's delete queue) does not extend
+  // the lifetime of the underlying BaseTracer - the holder's contents are cleared when the
+  // owning IncomingRequest is destroyed, releasing the UserSpanObserver and its tracer ref.
+  jsg::AsyncContextFrame::StorageScope makeUserAsyncTraceScope(Worker::Lock& lock,
+      kj::Maybe<kj::Own<UserTraceSpanHolder>> userSpanHolder = kj::none) KJ_WARN_UNUSED_RESULT;
 
   // Returns the current span being recorded.  If called while the JS lock is held, uses the trace
   // information from the current async context, if available.
