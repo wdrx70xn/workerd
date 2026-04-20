@@ -3180,6 +3180,22 @@ class Server::WorkerService final: public Service,
       }
     }
 
+    class ActorChannelImpl final: public IoChannelFactory::ActorChannel {
+     public:
+      ActorChannelImpl(kj::Own<ActorNamespace::ActorContainer> actorContainer)
+          : actorContainer(kj::mv(actorContainer)) {}
+      ~ActorChannelImpl() noexcept(false) {
+        actorContainer->updateAccessTime();
+      }
+
+      kj::Own<WorkerInterface> startRequest(IoChannelFactory::SubrequestMetadata metadata) override {
+        return newPromisedWorkerInterface(actorContainer->startRequest(kj::mv(metadata)));
+      }
+
+     private:
+      kj::Own<ActorNamespace::ActorContainer> actorContainer;
+    };
+
     // Implements actor loopback, which is used by websocket hibernation to deliver events to the
     // actor from the websocket's read loop.
     class Loopback: public Worker::Actor::Loopback, public kj::Refcounted {
@@ -3384,22 +3400,6 @@ class Server::WorkerService final: public Service,
   kj::Maybe<kj::String> dockerPath;
   kj::Maybe<kj::String> containerEgressInterceptorImage;
   bool isDynamic;
-
-  class ActorChannelImpl final: public IoChannelFactory::ActorChannel {
-   public:
-    ActorChannelImpl(kj::Own<ActorNamespace::ActorContainer> actorContainer)
-        : actorContainer(kj::mv(actorContainer)) {}
-    ~ActorChannelImpl() noexcept(false) {
-      actorContainer->updateAccessTime();
-    }
-
-    kj::Own<WorkerInterface> startRequest(IoChannelFactory::SubrequestMetadata metadata) override {
-      return newPromisedWorkerInterface(actorContainer->startRequest(kj::mv(metadata)));
-    }
-
-   private:
-    kj::Own<ActorNamespace::ActorContainer> actorContainer;
-  };
 
   // ---------------------------------------------------------------------------
   // implements kj::TaskSet::ErrorHandler
