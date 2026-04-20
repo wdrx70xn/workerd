@@ -42,7 +42,7 @@ kj::OneOf<kj::Array<byte>, kj::Promise<kj::Array<byte>>> ChannelTokenHandler::
         kj::Maybe<kj::StringPtr> entrypoint,
         Frankenvalue& props) {
   auto message = kj::heap<capnp::MallocMessageBuilder>(128);
-  auto builder = message->getRoot<ChannelToken>();
+  auto builder = message->getRoot<ChannelToken>().getService();
   kj::Vector<kj::Promise<void>> promises;
 
   builder.setType(type);
@@ -184,6 +184,24 @@ kj::OneOf<kj::Array<byte>, kj::Promise<kj::Array<byte>>> ChannelTokenHandler::
       ChannelToken::Type::ACTOR_CLASS, usage, serviceName, entrypoint, props);
 }
 
+kj::Array<byte> ChannelTokenHandler::encodeActorChannelToken(
+    IoChannelFactory::ChannelTokenUsage usage,
+    kj::StringPtr namespaceKey,
+    kj::ArrayPtr<const byte> id,
+    kj::Maybe<kj::StringPtr> name) {
+  capnp::word scratch[128]{};
+  capnp::MallocMessageBuilder message(scratch);
+  auto builder = message.getRoot<ChannelToken>().getActor();
+
+  builder.setNamespaceKey(namespaceKey);
+  builder.setId(id);
+  KJ_IF_SOME(n, name) {
+    builder.setName(n);
+  }
+
+  return serializeTokenImpl(usage, message);
+}
+
 kj::Own<Frankenvalue::CapTableEntry> ChannelTokenHandler::decodeChannelTokenImpl(
     ChannelToken::Type type,
     IoChannelFactory::ChannelTokenUsage usage,
@@ -253,56 +271,76 @@ kj::Own<Frankenvalue::CapTableEntry> ChannelTokenHandler::decodeChannelTokenImpl
   kj::ArrayInputStream input(plaintext);
   capnp::word scratch[128]{};
   capnp::PackedMessageReader message(input, {}, scratch);
-  auto reader = message.getRoot<ChannelToken>();
+  auto root = message.getRoot<ChannelToken>();
+  switch (root.which()) {
+    case ChannelToken::SERVICE: {
+      auto reader = root.getService();
 
-  KJ_REQUIRE(reader.getType() == type, "channel token type mismatch");
+      KJ_REQUIRE(reader.getType() == type, "channel token type mismatch");
 
-  kj::Maybe<kj::StringPtr> entrypoint;
-  if (reader.hasEntrypoint()) {
-    entrypoint = reader.getEntrypoint();
-  }
-
-  Frankenvalue props;
-  if (reader.hasProps()) {
-    auto propsReader = reader.getProps();
-    auto tableReader = propsReader.getCapTable().getAs<ChannelToken::FrankenvalueCapTable>();
-
-    kj::Vector<kj::Own<Frankenvalue::CapTableEntry>> capTable;
-    if (tableReader.hasCaps()) {
-      auto caps = tableReader.getCaps();
-      capTable.reserve(caps.size());
-
-      for (auto cap: caps) {
-        switch (cap.which()) {
-          case ChannelToken::FrankenvalueCapTable::Cap::UNKNOWN:
-            break;
-          case ChannelToken::FrankenvalueCapTable::Cap::SUBREQUEST_CHANNEL:
-            capTable.add(decodeSubrequestChannelToken(usage, cap.getSubrequestChannel()));
-            continue;
-          case ChannelToken::FrankenvalueCapTable::Cap::ACTOR_CLASS_CHANNEL:
-            capTable.add(decodeActorClassChannelToken(usage, cap.getActorClassChannel()));
-            continue;
-        }
-        KJ_FAIL_REQUIRE("unknown cap table type", cap.which());
+      kj::Maybe<kj::StringPtr> entrypoint;
+      if (reader.hasEntrypoint()) {
+        entrypoint = reader.getEntrypoint();
       }
+
+      Frankenvalue props;
+      if (reader.hasProps()) {
+        auto propsReader = reader.getProps();
+        auto tableReader = propsReader.getCapTable().getAs<ChannelToken::FrankenvalueCapTable>();
+
+        kj::Vector<kj::Own<Frankenvalue::CapTableEntry>> capTable;
+        if (tableReader.hasCaps()) {
+          auto caps = tableReader.getCaps();
+          capTable.reserve(caps.size());
+
+          for (auto cap: caps) {
+            switch (cap.which()) {
+              case ChannelToken::FrankenvalueCapTable::Cap::UNKNOWN:
+                break;
+              case ChannelToken::FrankenvalueCapTable::Cap::SUBREQUEST_CHANNEL:
+                capTable.add(decodeSubrequestChannelToken(usage, cap.getSubrequestChannel()));
+                continue;
+              case ChannelToken::FrankenvalueCapTable::Cap::ACTOR_CLASS_CHANNEL:
+                capTable.add(decodeActorClassChannelToken(usage, cap.getActorClassChannel()));
+                continue;
+            }
+            KJ_FAIL_REQUIRE("unknown cap table type", cap.which());
+          }
+        }
+
+        props = Frankenvalue::fromCapnp(propsReader, kj::mv(capTable));
+      }
+
+      // HACK: It would be more type-safe for us to return the (name, entrypoint, props) triplet and
+      //   let the caller call the appropriate resolver method. However, this would require making
+      //   heap string copies of the name and entrypoint which would just be thrown way immediately.
+      //   Since both types happen to subclass Frankenvalue::CapTableEntry, we just make the resolver
+      //   call here, return either type, and let the caller downcast to the right type.
+      switch (type) {
+        case ChannelToken::Type::SUBREQUEST:
+          return resolver.resolveEntrypoint(reader.getName(), entrypoint, kj::mv(props));
+        case ChannelToken::Type::ACTOR_CLASS:
+          return resolver.resolveActorClass(reader.getName(), entrypoint, kj::mv(props));
+      }
+
+      KJ_UNREACHABLE;
     }
 
-    props = Frankenvalue::fromCapnp(propsReader, kj::mv(capTable));
+    case ChannelToken::ACTOR: {
+      auto reader = root.getActor();
+
+      KJ_REQUIRE(type == ChannelToken::Type::SUBREQUEST, "channel token type mismatch");
+
+      kj::Maybe<kj::StringPtr> name;
+      if (reader.hasName()) {
+        name = reader.getName();
+      }
+
+      return resolver.resolveActor(reader.getNamespaceKey(), reader.getId(), name);
+    }
   }
 
-  // HACK: It would be more type-safe for us to return the (name, entrypoint, props) triplet and
-  //   let the caller call the appropriate resolver method. However, this would require making
-  //   heap string copies of the name and entrypoint which would just be thrown way immediately.
-  //   Since both types happen to subclass Frankenvalue::CapTableEntry, we just make the resolver
-  //   call here, return either type, and let the caller downcast to the right type.
-  switch (type) {
-    case ChannelToken::Type::SUBREQUEST:
-      return resolver.resolveEntrypoint(reader.getName(), entrypoint, kj::mv(props));
-    case ChannelToken::Type::ACTOR_CLASS:
-      return resolver.resolveActorClass(reader.getName(), entrypoint, kj::mv(props));
-  }
-
-  KJ_UNREACHABLE;
+  KJ_FAIL_REQUIRE("unknown channel token kind", root.which());
 }
 
 kj::Own<IoChannelFactory::SubrequestChannel> ChannelTokenHandler::decodeSubrequestChannelToken(

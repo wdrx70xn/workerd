@@ -137,6 +137,12 @@ class MockResolver: public ChannelTokenHandler::Resolver {
     return kj::refcounted<MockActorClassChannel>(
         ServiceTriplet(serviceName, entrypoint, kj::mv(props)));
   }
+
+  kj::Own<IoChannelFactory::ActorChannel> resolveActor(kj::StringPtr namespaceKey,
+      kj::ArrayPtr<const byte> id,
+      kj::Maybe<kj::StringPtr> name) override {
+    KJ_UNIMPLEMENTED("actor channels not mocked yet");
+  }
 };
 
 using Usage = IoChannelFactory::ChannelTokenUsage;

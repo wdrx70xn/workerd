@@ -48,26 +48,49 @@ struct ChannelToken {
   const rpcTokenMagic :UInt32 = 0x821dad26;
   const storageTokenMagic :UInt32 = 0x9082806d;
 
-  type @0 :Type;
-  # What type of channel does this point to? This is encoded as a safety measure. In normal
-  # operation the envelope containing the token always knows what type it is meant to be, but we
-  # want to prevent any possible shenanigans from someone taking a channel token of one type and
-  # trying to stuff it in an envelope for a different type.
+  union {
+    service :group {
+      # This points to an etrypoint exported by a service, with no associated storage.
+
+      type @0 :Type;
+      # What type of channel does this point to? This is encoded as a safety measure. In normal
+      # operation the envelope containing the token always knows what type it is meant to be, but we
+      # want to prevent any possible shenanigans from someone taking a channel token of one type and
+      # trying to stuff it in an envelope for a different type.
+
+      name @1 :Text;
+      # Name of the service in the workerd config's services list.
+
+      entrypoint @2 :Text;
+      # Name of the entrypoint the channel points at. For subrequest channels this must be a
+      # WorkerEntrypoint derivative (or plain object implementing `ExportedHandlers`). For actor
+      # class channels this must be a `DurableObject` implementation.
+
+      props @3 :Frankenvalue;
+    }
+
+    actor :group {
+      # This points to a specific actor instance.
+      #
+      # The type is implicitly `subrequest` -- ActorChannel is a subclass of SubrequestChannel.
+
+      namespaceKey @4 :Text;
+      # The `uniqueKey` for the namespace, as defined in workerd.capnp.
+      #
+      # This identifies the specific namespace that the token points at.
+
+      id @5 :Data;
+      # Raw DO ID bytes (not hex).
+
+      name @6 :Text;
+      # Name, if known, otherwise null.
+    }
+  }
 
   enum Type {
     subrequest @0;  # token for IoChannelFactory::SubrequestChannel
     actorClass @1;  # token for IoChannelFactory::ActorClassChannel
   }
-
-  name @1 :Text;
-  # Name of the service in the workerd config's services list.
-
-  entrypoint @2 :Text;
-  # Name of the entrypoint the channel points at. For subrequest channels this must be a
-  # WorkerEntrypoint derivative (or plain object implementing `ExportedHandlers`). For actor class
-  # channels this must be a `DurableObject` implementation.
-
-  props @3 :Frankenvalue;
 
   struct FrankenvalueCapTable {
     # CapTable representation for `ChannelToken.props`.
