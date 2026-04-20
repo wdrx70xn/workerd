@@ -4,6 +4,7 @@
 
 import { withSpan } from 'cloudflare-internal:tracing-helpers';
 import type { Span } from './tracing';
+import type { D1RpcBatchResponse, D1RpcRequest } from './d1-binding-types';
 
 interface D1Meta {
   duration: number;
@@ -41,6 +42,26 @@ interface D1Meta {
 interface Fetcher {
   fetch: typeof fetch;
 }
+
+/**
+ * JSRPC surface exposed by the D1 eyeball's `D1Binding` WorkerEntrypoint
+ * (see `d1-binding-types.ts` for the authoritative interface). The shim
+ * only learns about two methods because `dump()` intentionally stays on
+ * HTTP forever — deprecated v1-alpha API.
+ */
+interface EyeballRpcStub {
+  query<T = unknown>(req: D1RpcRequest): Promise<D1RpcBatchResponse<T>>;
+  execute<T = unknown>(req: D1RpcRequest): Promise<D1RpcBatchResponse<T>>;
+}
+
+/**
+ * Inner binding resolved against either a legacy Tunnel (`.fetch()` only) or
+ * a JSRPC `WorkerEntrypoint` (`.fetch()` + `.query()` + `.execute()`).
+ * `Partial<EyeballRpcStub>` because the legacy path has no RPC methods;
+ * `_send` dispatches on `typeof this.fetcher.query === 'function'`, mirroring
+ * the pattern in `images-api.ts`.
+ */
+type D1Stub = Fetcher & Partial<EyeballRpcStub>;
 
 type D1Response = {
   success: true;
@@ -109,9 +130,9 @@ class D1Database {
   // TODO(soon): Can we use the # syntax here?
   // eslint-disable-next-line no-restricted-syntax
   private readonly alwaysPrimarySession: D1DatabaseSessionAlwaysPrimary;
-  protected readonly fetcher: Fetcher;
+  protected readonly fetcher: D1Stub;
 
-  constructor(fetcher: Fetcher) {
+  constructor(fetcher: D1Stub) {
     this.fetcher = fetcher;
     this.alwaysPrimarySession = new D1DatabaseSessionAlwaysPrimary(
       this.fetcher
@@ -151,11 +172,11 @@ class D1Database {
 }
 
 class D1DatabaseSession {
-  protected fetcher: Fetcher;
+  protected fetcher: D1Stub;
   protected bookmarkOrConstraint: D1SessionBookmarkOrConstraint;
 
   constructor(
-    fetcher: Fetcher,
+    fetcher: D1Stub,
     bookmarkOrConstraint: D1SessionBookmarkOrConstraint
   ) {
     this.fetcher = fetcher;
@@ -308,17 +329,56 @@ class D1DatabaseSession {
     resultsFormat: ResultsFormat,
     span: Span
   ): Promise<D1UpstreamResponse<T>[] | D1UpstreamResponse<T>> {
+    const isBatch = Array.isArray(query);
+    const statements = isBatch
+      ? query.map((s: string, i: number) => ({
+          sql: s,
+          params: params[i] as unknown[],
+        }))
+      : [{ sql: query, params }];
+
+    // JSRPC fast path: dispatch on the presence of `.query`/`.execute` on the
+    // inner binding. Legacy Tunnel bindings only expose `.fetch()`, so this
+    // branch is never taken for pipelines that have not been migrated yet.
+    // `dump()` intentionally stays on HTTP (never reaches this method with
+    // `/dump`; kept out of the switch for safety).
+    const rpc =
+      endpoint === '/query'
+        ? this.fetcher.query
+        : endpoint === '/execute'
+          ? this.fetcher.execute
+          : undefined;
+
+    if (typeof rpc === 'function') {
+      // Propagate errors thrown by the eyeball unchanged — it already tags
+      // them with the `D1_ERROR:` prefix in `classifyEyeballError`. In-band
+      // `{success: false}` slots are handled by `_sendOrThrow`'s existing
+      // `firstIfArray` check, same contract as the HTTP path.
+      const res = await rpc.call(this.fetcher, {
+        statements,
+        bookmarkOrConstraint: this.bookmarkOrConstraint,
+      });
+      if (res.bookmark) {
+        this._updateBookmark(res.bookmark);
+      }
+      // `D1RpcStatementResult<T>[]` is structurally compatible with
+      // `D1UpstreamResponse<T>[]` at runtime — the only static mismatch is
+      // that `D1Response.meta` intersects with `Record<string, unknown>` (an
+      // HTTP-path allowance for extra diagnostic fields) while the RPC
+      // wire's `D1RpcStatementMeta` has a closed field set. The cast is
+      // safe: extras, if any, would be purely additive, and the failure
+      // variant's extra `isUserCaused?` is ignored by every downstream
+      // consumer (`_sendOrThrow`, `toArrayOfObjects`, facade methods).
+      const mapped = res.results as unknown as D1UpstreamResponse<T>[];
+      // For single-statement callers, unwrap the length-1 results array.
+      // `firstIfArray` returns the input unchanged when the input isn't an
+      // array, which is why we only take the branch here when `isBatch`.
+      return isBatch ? mapped : firstIfArray(mapped);
+    }
+
+    // Legacy HTTP path — unchanged.
     /* this needs work - we currently only support ordered ?n params */
-    const body = JSON.stringify(
-      Array.isArray(query)
-        ? query.map((s: string, index: number) => {
-            return { sql: s, params: params[index] };
-          })
-        : {
-            sql: query,
-            params: params,
-          }
-    );
+    const body = JSON.stringify(isBatch ? statements : statements[0]);
 
     const url = new URL(endpoint, 'http://d1');
     url.searchParams.set('resultsFormat', resultsFormat);
@@ -355,7 +415,7 @@ class D1DatabaseSession {
 }
 
 class D1DatabaseSessionAlwaysPrimary extends D1DatabaseSession {
-  constructor(fetcher: Fetcher) {
+  constructor(fetcher: D1Stub) {
     // Will always go to primary, since we won't be ever updating this constraint.
     super(fetcher, D1_SESSION_CONSTRAINT_FIRST_PRIMARY);
   }
@@ -818,6 +878,6 @@ function aggregateD1Meta(metas: PartialD1Meta[]): D1Meta {
   return aggregatedMeta;
 }
 
-export default function makeBinding(env: { fetcher: Fetcher }): D1Database {
+export default function makeBinding(env: { fetcher: D1Stub }): D1Database {
   return new D1Database(env.fetcher);
 }

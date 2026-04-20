@@ -21,7 +21,28 @@ const unitTests :Workerd.Config = (
               service = "d1-mock"
             )],
           )
+        ),
+        (
+          name = "d1Rpc",
+          wrapped = (
+            moduleName = "cloudflare-internal:d1-api",
+            innerBindings = [(
+              name = "fetcher",
+              service = "d1-rpc-mock"
+            )],
+          )
         )
+        ],
+      )
+    ),
+    ( name = "d1-rpc-mock",
+      worker = (
+        compatibilityFlags = ["experimental", "nodejs_compat"],
+        modules = [
+          (name = "worker", esModule = embed "d1-rpc-mock.js")
+        ],
+        bindings = [
+          (name = "d1Mock", service = "d1-mock"),
         ],
       )
     ),

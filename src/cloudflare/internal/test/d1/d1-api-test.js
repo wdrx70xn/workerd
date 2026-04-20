@@ -15,3 +15,19 @@ export const testExec = {
     await testD1Exec(env.d1);
   },
 };
+
+// JSRPC-transport variants: exercise the same test bodies against a binding
+// whose inner stage is the `D1RpcMock` WorkerEntrypoint instead of the HTTP
+// `d1-mock`. The facade behavior is transport-agnostic, so these should pass
+// byte-identically.
+export const testWithoutSessionsRpc = {
+  async test(_ctr, env) {
+    await testD1ApiQueriesHappyPath(env.d1Rpc);
+  },
+};
+
+export const testExecRpc = {
+  async test(_ctr, env) {
+    await testD1Exec(env.d1Rpc);
+  },
+};

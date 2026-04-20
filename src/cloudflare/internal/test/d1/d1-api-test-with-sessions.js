@@ -16,9 +16,21 @@ function getDBFromEnv(env) {
   return env.d1;
 }
 
+// JSRPC-transport getter: returns the binding whose inner stage is the
+// `D1RpcMock` WorkerEntrypoint. Same SQLite state and same commit-token
+// accumulator as the HTTP binding (the RPC mock delegates to `d1-mock`).
+function getDBFromEnvRpc(env) {
+  return env.d1Rpc;
+}
+
 export const test_d1_api_happy_path = test(
   testD1ApiQueriesHappyPath,
   getDBFromEnv
+);
+
+export const test_d1_api_happy_path_rpc = test(
+  testD1ApiQueriesHappyPath,
+  getDBFromEnvRpc
 );
 
 export const test_d1_api_happy_path_withsessions_default = test(
@@ -26,9 +38,19 @@ export const test_d1_api_happy_path_withsessions_default = test(
   (env) => getDBFromEnv(env).withSession()
 );
 
+export const test_d1_api_happy_path_withsessions_default_rpc = test(
+  testD1ApiQueriesHappyPath,
+  (env) => getDBFromEnvRpc(env).withSession()
+);
+
 export const test_d1_api_happy_path_withsessions_first_unconstrained = test(
   testD1ApiQueriesHappyPath,
   (env) => getDBFromEnv(env).withSession('first-unconstrained')
+);
+
+export const test_d1_api_happy_path_withsessions_first_unconstrained_rpc = test(
+  testD1ApiQueriesHappyPath,
+  (env) => getDBFromEnvRpc(env).withSession('first-unconstrained')
 );
 
 export const test_d1_api_happy_path_withsessions_first_primary = test(
@@ -36,9 +58,19 @@ export const test_d1_api_happy_path_withsessions_first_primary = test(
   (env) => getDBFromEnv(env).withSession('first-primary')
 );
 
+export const test_d1_api_happy_path_withsessions_first_primary_rpc = test(
+  testD1ApiQueriesHappyPath,
+  (env) => getDBFromEnvRpc(env).withSession('first-primary')
+);
+
 export const test_d1_api_happy_path_withsessions_some_ranomd_token = test(
   testD1ApiQueriesHappyPath,
   (env) => getDBFromEnv(env).withSession('token-doesnot-matter-for-now')
+);
+
+export const test_d1_api_happy_path_withsessions_some_ranomd_token_rpc = test(
+  testD1ApiQueriesHappyPath,
+  (env) => getDBFromEnvRpc(env).withSession('token-doesnot-matter-for-now')
 );
 
 // envD1MockFetcher is the default export worker in `d1-mock.js`, i.e. the `fetch()` entry point.
@@ -68,6 +100,11 @@ const setNextCommitTokenFromEyeball = async (envD1MockFetcher, t) =>
 export const test_d1_api_withsessions_token_handling = test(
   testD1ApiWithSessionsTokensHandling,
   getDBFromEnv
+);
+
+export const test_d1_api_withsessions_token_handling_rpc = test(
+  testD1ApiWithSessionsTokensHandling,
+  getDBFromEnvRpc
 );
 
 async function testD1ApiWithSessionsTokensHandling(DB, envD1MockFetcher) {
@@ -116,6 +153,11 @@ async function testD1ApiWithSessionsTokensHandling(DB, envD1MockFetcher) {
 export const test_d1_api_withsessions_old_token_skipped = test(
   testD1ApiWithSessionsOldTokensSkipped,
   getDBFromEnv
+);
+
+export const test_d1_api_withsessions_old_token_skipped_rpc = test(
+  testD1ApiWithSessionsOldTokensSkipped,
+  getDBFromEnvRpc
 );
 
 async function testD1ApiWithSessionsOldTokensSkipped(DB, envD1MockFetcher) {
