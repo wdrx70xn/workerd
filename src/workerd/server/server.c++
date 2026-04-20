@@ -4077,29 +4077,14 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         // may be used in error logs.
         auto isolateName = kj::str(namespaceName, ':', n);
 
-        // For named isolates, create a callback that removes this isolate from
-        // the map when abortIsolate() is called.
-        kj::Function<void()> abortCallback = [this, key = kj::str(n)]() mutable {
-          isolates.erase(key);
-        };
-
         return {.key = kj::mv(n),
-          .value = kj::rc<WorkerStubImpl>(
-              server, kj::mv(isolateName), kj::mv(fetchSource), kj::mv(abortCallback))};
+          .value = kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource))};
       })
           .addRef()
           .toOwn();
     } else {
-      // For anonymous isolates, there's no map entry to remove, but we still need
-      // a callback to indicate this is a dynamic worker (so abortIsolate doesn't
-      // terminate the process).
       auto isolateName = kj::str(namespaceName, ":dynamic:", randomUUID(server.entropySource));
-      kj::Function<void()> abortCallback = []() {
-        // Anonymous workers have no map entry to remove, so this is a no-op.
-      };
-      return kj::rc<WorkerStubImpl>(
-          server, kj::mv(isolateName), kj::mv(fetchSource), kj::mv(abortCallback))
-          .toOwn();
+      return kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource)).toOwn();
     }
   }
 
@@ -4136,11 +4121,11 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
    public:
     WorkerStubImpl(Server& server,
         kj::String isolateName,
-        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource,
-        kj::Maybe<kj::Function<void()>> abortIsolateCallback)
-        : startupTask(
-              start(server, kj::mv(isolateName), kj::mv(fetchSource), kj::mv(abortIsolateCallback))
-                  .fork()) {}
+        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource)
+        : server(server),
+          isolateName(kj::mv(isolateName)),
+          fetchSource(kj::mv(fetchSource)),
+          startupTask(startImpl().fork()) {}
 
     ~WorkerStubImpl() {
       unlink();
@@ -4163,13 +4148,32 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
     }
 
    private:
-    kj::Maybe<kj::Own<WorkerService>> service;  // null if still starting up
+    Server& server;
+    kj::String isolateName;
+    // `fetchSource` is retained so that we can re-invoke it to reload the isolate after
+    // abortIsolate() has terminated it.
+    kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource;
+    kj::Maybe<kj::Own<WorkerService>> service;  // null if still starting up or aborted
     kj::ForkedPromise<void> startupTask;        // resolves when `service` is non-null
 
-    kj::Promise<void> start(Server& server,
-        kj::String isolateName,
-        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource,
-        kj::Maybe<kj::Function<void()>> abortIsolateCallback) {
+    // Called when abortIsolate() is invoked on this dynamic worker's isolate. Drops the
+    // current service and arranges for the next request to cause a reload via `fetchSource`.
+    void onAbortIsolate() {
+      // We are being called from within the current service's own execution. We must not
+      // synchronously destroy or unlink the service now. Instead, transfer ownership of the
+      // old service onto a deferred task so that it is released only after the current stack
+      // unwinds, and replace the startup task with one that performs a fresh load.
+      auto oldService = kj::mv(service);
+      service = kj::none;
+      startupTask = kj::evalLater([this, oldService = kj::mv(oldService)]() mutable
+                                  -> kj::Promise<void> { return startImpl(); }).fork();
+    }
+
+    kj::Promise<void> startImpl() {
+      return start(server, isolateName);
+    }
+
+    kj::Promise<void> start(Server& server, kj::StringPtr isolateName) {
       auto source = co_await fetchSource();
       static const kj::HashMap<kj::String, ActorConfig> EMPTY_ACTOR_CONFIGS;
 
@@ -4245,7 +4249,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         // to not copy the ownContent if it is an RPC response.
         .maybeOwnedSourceCode = kj::mv(source.ownContent),
 
-        .abortIsolateCallback = kj::mv(abortIsolateCallback),
+        // abortIsolate() callback: tear down the current service and reload. The callback
+        // is owned by the isolate which is owned by the service, which is owned by `this`,
+        // so a raw pointer is safe.
+        .abortIsolateCallback = kj::Function<void()>([self = this]() { self->onAbortIsolate(); }),
         // clang-format on
       };
 
@@ -4287,14 +4294,21 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
      private:
       kj::Rc<WorkerStubImpl> isolate;
       kj::Maybe<kj::String> entrypointName;
-      Frankenvalue props;  // moved away when `entrypointService` is initialized
+      // `props` is cloned (not moved) each time we materialize an entrypoint, so that we can
+      // reload the entrypoint if the underlying isolate is aborted and re-created.
+      Frankenvalue props;
 
+      // Pointer to the service backing `entrypointService`. When the underlying service is
+      // recreated (e.g. after abortIsolate()), this pointer changes and we re-fetch.
+      WorkerService* cachedServicePtr = nullptr;
       kj::Maybe<kj::Own<Service>> entrypointService;
 
       kj::Own<WorkerInterface> startRequestImpl(IoChannelFactory::SubrequestMetadata metadata) {
         auto& service = KJ_ASSERT_NONNULL(isolate->service);
-        if (entrypointService == kj::none) {
-          entrypointService = service->getEntrypoint(entrypointName, kj::mv(props));
+        if (cachedServicePtr != service.get()) {
+          // Either first request or service was recreated (e.g., after abortIsolate()).
+          entrypointService = service->getEntrypoint(entrypointName, props.clone());
+          cachedServicePtr = service.get();
         }
         KJ_IF_SOME(ep, entrypointService) {
           return ep->startRequest(kj::mv(metadata));
@@ -4321,18 +4335,20 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
       }
 
       kj::Maybe<kj::Promise<void>> whenReady() override {
-        if (inner != kj::none) return kj::none;
-
         KJ_IF_SOME(service, isolate->service) {
-          inner = service->getActorClass(entrypointName, kj::mv(props));
+          if (cachedServicePtr != service.get()) {
+            inner = service->getActorClass(entrypointName, props.clone());
+            cachedServicePtr = service.get();
+          }
           return kj::none;
         }
 
         // Have to wait for the isolate to start up.
         return isolate->startupTask.addBranch().then([this]() {
-          if (inner == kj::none) {
-            inner =
-                KJ_ASSERT_NONNULL(isolate->service)->getActorClass(entrypointName, kj::mv(props));
+          auto& service = KJ_ASSERT_NONNULL(isolate->service);
+          if (cachedServicePtr != service.get()) {
+            inner = service->getActorClass(entrypointName, props.clone());
+            cachedServicePtr = service.get();
           }
         });
       }
@@ -4358,8 +4374,11 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
      private:
       kj::Rc<WorkerStubImpl> isolate;
       kj::Maybe<kj::String> entrypointName;
-      Frankenvalue props;  // moved away when `inner` is initialized
+      // Cloned (not moved) on each materialization so that we can re-materialize after the
+      // isolate is aborted and re-created.
+      Frankenvalue props;
 
+      WorkerService* cachedServicePtr = nullptr;
       kj::Maybe<kj::Own<ActorClass>> inner;
 
       ActorClass& getInner() {
