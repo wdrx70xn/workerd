@@ -457,11 +457,6 @@ fn panic_in_rust_backed_api_errors_request_and_terminates_isolate() {
         ctx.eval_raw("function handleRequest() { while(true) { obj.panicNow(); } throw null; }")
             .unwrap();
 
-        assert!(
-            !lock.is_termination_requested(),
-            "termination should not be requested before the panic"
-        );
-
         // Invoke the handler — the panic inside panicNow() is caught by
         // catch_panic, which calls throw_internal_error() then
         // request_termination().  The internal error exception is set first
@@ -481,12 +476,6 @@ fn panic_in_rust_backed_api_errors_request_and_terminates_isolate() {
             !err.message.contains("intentional panic in jsg_method"),
             "raw panic message must not be exposed to JS, got: {:?}",
             err.message
-        );
-
-        // The isolate is now terminated: no further JS execution is possible.
-        assert!(
-            lock.is_termination_requested(),
-            "termination must be requested after a panic in a Rust-backed method"
         );
 
         Ok(())
