@@ -1,0 +1,44 @@
+using Workerd = import "/workerd/workerd.capnp";
+
+# Validates that an orphaned enterSpan (whose promise never settles) on a Durable Object
+# does not delay the outcome event past end-of-request. The test makes two sequential
+# requests to the same DO (same IoContext). If the orphaned span holds the BaseTracer open
+# on the delete queue, the first request's outcome will be delayed until actor shutdown,
+# and the tail worker's validation test will time out.
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "tracing-orphaned-span-test",
+      worker = .mainWorker,
+    ),
+    ( name = "TEST_TMPDIR", disk = (writable = true) ),
+    ( name = "tail", worker = .tailWorker ),
+  ],
+);
+
+const mainWorker :Workerd.Worker = (
+  compatibilityFlags = ["experimental", "nodejs_compat"],
+
+  modules = [
+    (name = "worker", esModule = embed "tracing-orphaned-span-test.js"),
+  ],
+
+  durableObjectNamespaces = [
+    (className = "OrphanedSpanDO", uniqueKey = "orphanedspantest0000000000000001"),
+  ],
+
+  durableObjectStorage = (inMemory = void),
+
+  bindings = [
+    (name = "ns", durableObjectNamespace = "OrphanedSpanDO"),
+  ],
+
+  streamingTails = ["tail"],
+);
+
+const tailWorker :Workerd.Worker = (
+  modules = [
+    (name = "worker", esModule = embed "tracing-orphaned-span-instrumentation-test.js"),
+  ],
+  compatibilityFlags = ["experimental", "nodejs_compat"],
+);
