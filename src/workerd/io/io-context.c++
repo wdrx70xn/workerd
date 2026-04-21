@@ -261,11 +261,11 @@ void IoContext::IncomingRequest::delivered(kj::SourceLocation location) {
   deliveredLocation = location;
   metrics->delivered();
 
-  // Create the root user trace span once per request. The UserTraceSpanHolder allows other
-  // references to observe the span without extending its (and the underlying tracer's) lifetime
-  // beyond the request - see the comment on UserTraceSpanHolder for rationale.
+  // Create the root user trace span once per request. The SpanParent's observer chain holds
+  // a WeakRef<BaseTracer> (not a strong addRef), so storing it in IoOwn<SpanParent> in the
+  // AsyncContextFrame will not extend the BaseTracer's lifetime past end-of-request.
   KJ_IF_SOME(workerTracer, workerTracer) {
-    userTraceSpanHolder->setSpan(workerTracer->makeUserRequestSpan());
+    rootUserTraceSpan = workerTracer->makeUserRequestSpan();
   }
 
   KJ_IF_SOME(a, context->actor) {
@@ -295,20 +295,11 @@ IoContext::IncomingRequest::~IoContext_IncomingRequest() noexcept(false) {
     return;
   }
 
-  // Clear the root user trace span holder. Other references to the holder (e.g. from
-  // AsyncContextFrame storage via IoOwn in the IoContext's delete queue) will remain valid
-  // but their getSpan() calls will now return SpanParent(nullptr). This releases the
-  // UserSpanObserver's reference to the BaseTracer immediately, which is necessary because:
-  //
-  // 1. BaseTracer's destructor emits the final "outcome" tail-stream event.
-  // 2. For actor requests, the IoContext lives across many requests - so if the user span
-  //    kept the tracer alive through the delete queue, the outcome event would only be
-  //    emitted at actor shutdown, not at end-of-request.
-  //
-  // This must happen before `metrics` (RequestObserverWithTracer) is destroyed, so that when
-  // it stores the outcome in its destructor, the tracer is free to be destroyed immediately
-  // after (its destructor emits the stored outcome).
-  userTraceSpanHolder->clear();
+  // No explicit span cleanup needed: the SpanSubmitter now holds a WeakRef<BaseTracer> rather
+  // than a strong ref, so IoOwn<SpanParent> objects on the delete queue cannot extend the
+  // BaseTracer's lifetime. The rootUserTraceSpan member will be dropped naturally when this
+  // IncomingRequest is destroyed (reverse member declaration order), and any IoOwn<SpanParent>
+  // in the AsyncContextFrame will contain a dead WeakRef after the BaseTracer is gone.
 
   // Hack: We need to report an accurate time stamps for the STW outcome event, but the timer may
   // not be available when the outcome event gets reported. Define the outcome event time as the
@@ -1093,23 +1084,26 @@ jsg::AsyncContextFrame::StorageScope IoContext::makeAsyncTraceScope(
 }
 
 jsg::AsyncContextFrame::StorageScope IoContext::makeUserAsyncTraceScope(
-    Worker::Lock& lock, kj::Maybe<kj::Own<UserTraceSpanHolder>> userSpanHolderOverride) {
+    Worker::Lock& lock, kj::Maybe<SpanParent> spanParentOverride) {
+  static const SpanParent dummySpanParent = nullptr;
+
   jsg::Lock& js = lock;
-  kj::Own<UserTraceSpanHolder> holder;
-  KJ_IF_SOME(h, kj::mv(userSpanHolderOverride)) {
-    holder = kj::mv(h);
+  kj::Own<SpanParent> spanParent;
+  KJ_IF_SOME(spo, kj::mv(spanParentOverride)) {
+    spanParent = kj::heap(kj::mv(spo));
   } else {
-    // Default: use the current incoming request's root user trace span holder. If there is no
-    // current incoming request (or it has no holder), create a freestanding empty holder so the
-    // storage scope still behaves predictably.
-    KJ_IF_SOME(h, getRootUserTraceSpanHolder()) {
-      holder = kj::mv(h);
+    // Default: use the current incoming request's root user trace span.
+    SpanParent rootSpan = getRootUserTraceSpan();
+    if (!rootSpan.isObserved()) {
+      // const_cast is ok: There's no state that could be changed in a non-observed span parent.
+      spanParent = kj::Own<SpanParent>(
+          &const_cast<SpanParent&>(dummySpanParent), kj::NullDisposer::instance);
     } else {
-      holder = kj::refcounted<UserTraceSpanHolder>();
+      spanParent = kj::heap(kj::mv(rootSpan));
     }
   }
-  auto ioOwnHolder = IoContext::current().addObject(kj::mv(holder));
-  auto spanHandle = jsg::wrapOpaque(js.v8Context(), kj::mv(ioOwnHolder));
+  auto ioOwnSpanParent = IoContext::current().addObject(kj::mv(spanParent));
+  auto spanHandle = jsg::wrapOpaque(js.v8Context(), kj::mv(ioOwnSpanParent));
   return jsg::AsyncContextFrame::StorageScope(
       js, lock.getUserTraceAsyncContextKey(), js.v8Ref(spanHandle));
 }
@@ -1139,14 +1133,12 @@ SpanParent IoContext::getCurrentUserTraceSpan() {
       KJ_IF_SOME(value, frame.get(lock.getUserTraceAsyncContextKey())) {
         auto handle = value.getHandle(lock);
         jsg::Lock& js = lock;
-        auto& holder = jsg::unwrapOpaqueRef<IoOwn<UserTraceSpanHolder>>(js.v8Isolate, handle);
-        return holder->getSpan();
+        auto& spanParent = jsg::unwrapOpaqueRef<IoOwn<SpanParent>>(js.v8Isolate, handle);
+        return spanParent->addRef();
       }
     }
   }
   // Fall back to the root user span from the current IncomingRequest (if any).
-  // This is the root span created during delivered() - its lifetime is tied to the
-  // IncomingRequest, so we don't need to worry about extending the tracer's lifetime here.
   if (incomingRequests.empty()) {
     return SpanParent(nullptr);
   }

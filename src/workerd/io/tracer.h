@@ -6,6 +6,7 @@
 
 #include <workerd/io/io-context.h>
 #include <workerd/io/trace.h>
+#include <workerd/util/weak-refs.h>
 
 #include <kj/refcount.h>
 
@@ -24,7 +25,27 @@ class WorkerTracer;
 // there will be plenty of cleanup potential.
 class BaseTracer: public kj::Refcounted {
  public:
-  virtual ~BaseTracer() noexcept(false) {};
+  virtual ~BaseTracer() noexcept(false) {
+    // Invalidate the WeakRef after the derived class destructor has run (e.g., after
+    // ~WorkerTracer has emitted the outcome event). This ensures that any code holding a
+    // WeakRef<BaseTracer> sees it as invalid only after the tracer has fully finalized.
+    KJ_IF_SOME(ref, weakRef) {
+      ref->invalidate();
+    }
+  }
+
+  // Returns a weak reference to this tracer. The WeakRef becomes invalid when the tracer is
+  // destroyed. Used by SequentialSpanSubmitter so that span observers do not extend the tracer's
+  // lifetime — the IncomingRequest is the sole owner that matters, and the outcome event must
+  // fire at end-of-request, not when orphaned spans on the delete queue are finally destroyed.
+  kj::Own<WeakRef<BaseTracer>> getWeakRef() {
+    KJ_IF_SOME(ref, weakRef) {
+      return ref->addRef();
+    }
+    auto ref = kj::refcounted<WeakRef<BaseTracer>>(kj::Badge<BaseTracer>{}, *this);
+    weakRef = kj::addRef(*ref);
+    return ref;
+  }
 
   // Adds log line to trace.  For Spectre, timestamp should only be as accurate as JS Date.now().
   virtual void addLog(const tracing::InvocationSpanContext& context,
@@ -112,6 +133,12 @@ class BaseTracer: public kj::Refcounted {
   // When true, the destructor will not log a warning about missing Onset event.
   // Set via markUnused() when a tracer is intentionally not used (e.g., duplicate alarm requests).
   bool markedUnused = false;
+
+ private:
+  friend class WeakRef<BaseTracer>;
+
+  // Lazily-created weak ref, returned by getWeakRef(). Invalidated in the destructor.
+  kj::Maybe<kj::Own<WeakRef<BaseTracer>>> weakRef;
 };
 
 // Records a worker stage's trace information into a Trace object.  When all references to the

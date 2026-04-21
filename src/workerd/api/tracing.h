@@ -26,13 +26,10 @@ using TagValue = kj::OneOf<bool, double, kj::String>;
 // wraps it in either a kj::Own or an IoOwn depending on whether an IoContext is available,
 // and because the span may be force-ended while refs are still held by JS code.
 //
-// SpanImpl owns a reference to the UserTraceSpanHolder that was pushed onto the
-// AsyncContextFrame by Tracing::enterSpan(), and clears that holder's contents when the
-// span ends. This ensures that the underlying span observer (which transitively holds a
-// kj::Own<BaseTracer> via its SpanSubmitter) is released at end-of-span rather than at
-// IoContext destruction. Without this, actor IoContexts would leak tracer references across
-// IncomingRequest boundaries and the final "outcome" streaming-tail event would not be emitted
-// at the right time.
+// The SpanSubmitter held by the span's observer chain uses a WeakRef<BaseTracer> rather than
+// a strong kj::addRef, so SpanImpl objects on the IoContext's delete queue (via IoOwn) cannot
+// extend the BaseTracer's lifetime past end-of-request. This means the outcome event fires
+// at request end, and any orphaned spans are handled by the STW's orphan sweep.
 class SpanImpl final: public kj::Refcounted {
  public:
   // Construct an observed span.
@@ -47,37 +44,26 @@ class SpanImpl final: public kj::Refcounted {
 
   ~SpanImpl() noexcept(false);
 
-  // Records the end time, submits the span via its observer, clears any holder we pushed
-  // onto the AsyncContextFrame, and marks the span as no longer traced. Idempotent:
-  // subsequent calls are no-ops. Called automatically by Tracing::enterSpan() on
-  // callback completion, and implicitly by the destructor.
+  // Records the end time, submits the span via its observer, and marks the span as no longer
+  // traced. Idempotent: subsequent calls are no-ops. Called automatically by
+  // Tracing::enterSpan() on callback completion, and implicitly by the destructor.
   void end();
 
   bool getIsTraced();
 
   // Returns a SpanParent wrapping this span's observer, or a null SpanParent if the span has
-  // ended or has no observer. Used by Tracing::enterSpan() to populate the
-  // UserTraceSpanHolder that gets pushed onto the AsyncContextFrame.
+  // ended or has no observer. Used by Tracing::enterSpan() to create the SpanParent that
+  // gets pushed onto the AsyncContextFrame.
   workerd::SpanParent makeSpanParent();
 
   // Sets a single attribute on the span. If value is kj::none, the attribute is not set.
   void setAttribute(kj::String key, kj::Maybe<TagValue> maybeValue);
-
-  // Attach the UserTraceSpanHolder that was pushed onto the AsyncContextFrame when this span
-  // was activated. Called by Tracing::enterSpan() before running the callback. When the
-  // span ends, we clear() the holder so that the AsyncContextFrame's reference no longer
-  // keeps the span observer (and thus the BaseTracer) alive.
-  void attachAsyncContextHolder(kj::Own<workerd::UserTraceSpanHolder> holder);
 
  private:
   kj::Maybe<kj::Own<workerd::SpanObserver>> observer;
 
   // The under-construction span, or kj::none if the span has ended.
   kj::Maybe<workerd::Span> span;
-
-  // The AsyncContextFrame-pushed holder for this span, if any. Cleared in end() to release
-  // the underlying SpanParent (and the observer + BaseTracer chain) promptly.
-  kj::Maybe<kj::Own<workerd::UserTraceSpanHolder>> asyncContextHolder;
 
   size_t bytesUsed = 0;
 

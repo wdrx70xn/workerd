@@ -70,18 +70,6 @@ SpanImpl::~SpanImpl() noexcept(false) {
 }
 
 void SpanImpl::end() {
-  // Clear the AsyncContextFrame-pushed holder first. This releases the SpanParent the holder
-  // was guarding, which in turn drops one of the outstanding refs to our SpanObserver. Any
-  // other holders (e.g. from nested enterSpan() calls that have not yet ended) remain valid -
-  // this is how parent spans remain the logical parent of already-active child spans.
-  //
-  // Doing this before observer->report() is not strictly required for correctness (the
-  // observer is kept alive by our own `observer` member until we clear it below), but it is
-  // important that we do it before this SpanImpl is destroyed; otherwise, on actor IoContexts
-  // where the IoOwn<SpanImpl> may live past end-of-request, the holder's SpanParent would
-  // keep the observer (and thus the BaseTracer) alive past end-of-request.
-  asyncContextHolder = kj::none;
-
   KJ_IF_SOME(o, observer) {
     KJ_IF_SOME(s, span) {
       // Use the observer's getTime() so the end timestamp is rounded to I/O time (for
@@ -128,10 +116,6 @@ void SpanImpl::setAttribute(kj::String key, kj::Maybe<TagValue> maybeValue) {
     // If value is kj::none (undefined on the JS side), leave the attribute unset. This is the
     // idiomatic pattern for callers chaining setAttribute with optional values.
   }
-}
-
-void SpanImpl::attachAsyncContextHolder(kj::Own<workerd::UserTraceSpanHolder> holder) {
-  asyncContextHolder = kj::mv(holder);
 }
 
 void SpanImpl::setSpanDataLimitError(kj::StringPtr itemKind, kj::StringPtr name, size_t valueSize) {
@@ -207,18 +191,18 @@ v8::Local<v8::Value> Tracing::enterSpan(jsg::Lock& js,
     jsg::Arguments<jsg::Value> args,
     const jsg::TypeHandler<jsg::Ref<user_tracing::Span>>& spanHandler,
     const jsg::TypeHandler<jsg::Promise<jsg::Value>>& valuePromiseHandler) {
-  // Build the child SpanImpl, allocate a fresh UserTraceSpanHolder for it, and push the
-  // holder onto the AsyncContextFrame for the duration of the callback. The holder is
-  // cleared by SpanImpl::end() so the AsyncContextFrame's stashed reference does not keep
-  // the BaseTracer alive past end-of-request on actor IoContexts - see the comment on
-  // UserTraceSpanHolder in io-context.h for the rationale.
+  // Build the child SpanImpl and push a SpanParent onto the AsyncContextFrame for the
+  // duration of the callback. The SpanSubmitter holds a WeakRef<BaseTracer> rather than a
+  // strong addRef, so IoOwn<SpanParent> on the AsyncContextFrame's delete queue cannot extend
+  // the BaseTracer's lifetime past end-of-request — the outcome event fires on time and the
+  // STW's orphan sweep handles any unclosed spans.
   //
   // We use qualified `user_tracing::Span` / `user_tracing::SpanImpl` throughout this function
   // because an unqualified `Span` in this namespace resolves to workerd::Span (the runtime
   // span struct), which is a different type we also need to construct below.
 
   kj::Own<user_tracing::SpanImpl> impl;
-  kj::Maybe<kj::Own<UserTraceSpanHolder>> maybeHolder;
+  kj::Maybe<SpanParent> maybeSpanParent;
 
   if (IoContext::hasCurrent()) {
     auto& context = IoContext::current();
@@ -243,16 +227,9 @@ v8::Local<v8::Value> Tracing::enterSpan(jsg::Lock& js,
     impl = kj::refcounted<user_tracing::SpanImpl>(nullptr);
   }
 
-  // If we have an observed span, allocate a fresh holder to push onto the AsyncContextFrame.
-  // The holder indirection (instead of stuffing the SpanParent directly into an IoOwn) is
-  // the actor tracer-lifetime fix - see the UserTraceSpanHolder class comment in io-context.h.
+  // If we have an observed span, create a SpanParent to push onto the AsyncContextFrame.
   if (impl->getIsTraced()) {
-    auto holder = kj::refcounted<UserTraceSpanHolder>();
-    holder->setSpan(impl->makeSpanParent());
-    // Give the impl a strong ref to the holder so it can clear() the contents when the span
-    // ends (this is what releases the BaseTracer chain held via the span observer).
-    impl->attachAsyncContextHolder(kj::addRef(*holder));
-    maybeHolder = kj::mv(holder);
+    maybeSpanParent = impl->makeSpanParent();
   }
 
   // Wrap impl in IoOwn (when inside an IoContext) so destruction funnels through the
@@ -293,9 +270,11 @@ v8::Local<v8::Value> Tracing::enterSpan(jsg::Lock& js,
           jsSpan->end();
           js.throwException(kj::mv(exception));
         });
-        // If the promise never settles, the span will still be submitted when the IoOwn is
-        // destroyed (via ~SpanImpl calling end()), though this is a corner case and should
-        // generally be avoided by users.
+        // If the promise never settles, ~SpanImpl will call end() when the IoOwn is destroyed
+        // (at IoContext teardown). However, if the BaseTracer has already been destroyed by
+        // that point (which it will be on actors, since the SpanSubmitter holds a WeakRef),
+        // the span's report() will silently no-op and the span data will not be submitted.
+        // The STW's orphan sweep (triggered by the timely outcome event) handles this case.
         return valuePromiseHandler.wrap(js, kj::mv(promise));
       } else {
         // Synchronous success: end immediately.
@@ -309,15 +288,15 @@ v8::Local<v8::Value> Tracing::enterSpan(jsg::Lock& js,
     });
   };
 
-  // If we have both an IoContext and an observed span, push the holder onto the
+  // If we have both an IoContext and an observed span, push the SpanParent onto the
   // AsyncContextFrame for the duration of the callback. The StorageScope RAII object
   // restores the prior async-context storage on scope exit; any async continuations captured
   // during the callback will already have snapshotted the new frame and will continue to
   // see our child span as "current".
-  KJ_IF_SOME(holder, maybeHolder) {
+  KJ_IF_SOME(spanParent, kj::mv(maybeSpanParent)) {
     auto& context = IoContext::current();
     jsg::AsyncContextFrame::StorageScope traceScope =
-        context.makeUserAsyncTraceScope(context.getCurrentLock(), kj::mv(holder));
+        context.makeUserAsyncTraceScope(context.getCurrentLock(), kj::mv(spanParent));
     return executeCallback();
   } else {
     return executeCallback();

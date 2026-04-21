@@ -1723,31 +1723,47 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
 
 class SequentialSpanSubmitter final: public SpanSubmitter {
  public:
-  SequentialSpanSubmitter(kj::Own<WorkerTracer> workerTracer): workerTracer(kj::mv(workerTracer)) {}
-  void submitSpan(tracing::SpanId spanId, tracing::SpanId parentSpanId, const Span& span) override {
-    // This code path is workerd-only, we can safely utilize submitSpanOpen here.
-    submitSpanOpen(spanId, parentSpanId, span.operationName.clone(), span.startTime);
-    kj::Date startTime = span.startTime;
-    tracing::SpanEndData span2(spanId, span.endTime);
-    span2.tags.reserve(span.tags.size());
-    for (auto& tag: span.tags) {
-      span2.tags.insert(tag.key.clone(), spanTagClone(tag.value));
-    }
-    if (isPredictableModeForTest()) {
-      startTime = span2.endTime = kj::UNIX_EPOCH;
-    }
+  // Takes a WeakRef to the tracer rather than a strong kj::Own. This is critical for actors:
+  // the SpanParent -> UserSpanObserver -> SpanSubmitter chain can be stored in IoOwn objects
+  // that outlive the IncomingRequest (via the IoContext's delete queue). A strong ref here
+  // would keep the BaseTracer alive past end-of-request, preventing the outcome event from
+  // being emitted until the delete queue drains (potentially at actor shutdown). With a
+  // WeakRef, the BaseTracer dies with the IncomingRequest, the outcome fires on time, and
+  // any orphaned span submissions after that silently no-op.
+  SequentialSpanSubmitter(kj::Own<WeakRef<BaseTracer>> weakTracer)
+      : weakTracer(kj::mv(weakTracer)) {}
 
-    workerTracer->addSpanEnd(kj::mv(span2), startTime);
+  void submitSpan(tracing::SpanId spanId, tracing::SpanId parentSpanId, const Span& span) override {
+    KJ_IF_SOME(tracer, weakTracer->tryGet()) {
+      // This code path is workerd-only, we can safely utilize submitSpanOpen here.
+      submitSpanOpen(spanId, parentSpanId, span.operationName.clone(), span.startTime);
+      kj::Date startTime = span.startTime;
+      tracing::SpanEndData span2(spanId, span.endTime);
+      span2.tags.reserve(span.tags.size());
+      for (auto& tag: span.tags) {
+        span2.tags.insert(tag.key.clone(), spanTagClone(tag.value));
+      }
+      if (isPredictableModeForTest()) {
+        startTime = span2.endTime = kj::UNIX_EPOCH;
+      }
+
+      tracer.addSpanEnd(kj::mv(span2), startTime);
+    }
+    // If the tracer is dead (WeakRef invalidated), the IncomingRequest has been destroyed
+    // and the outcome event has already been emitted. Silently drop the span data — the
+    // STW's orphan sweep (triggered by the now-timely outcome) handles unclosed spans.
   }
 
   void submitSpanOpen(tracing::SpanId spanId,
       tracing::SpanId parentSpanId,
       kj::ConstString operationName,
       kj::Date startTime) override {
-    if (isPredictableModeForTest()) {
-      startTime = kj::UNIX_EPOCH;
+    KJ_IF_SOME(tracer, weakTracer->tryGet()) {
+      if (isPredictableModeForTest()) {
+        startTime = kj::UNIX_EPOCH;
+      }
+      tracer.addSpanOpen(spanId, parentSpanId, kj::mv(operationName), startTime);
     }
-    workerTracer->addSpanOpen(spanId, parentSpanId, kj::mv(operationName), startTime);
   }
 
   tracing::SpanId makeSpanId() override {
@@ -1757,7 +1773,7 @@ class SequentialSpanSubmitter final: public SpanSubmitter {
 
  private:
   uint64_t nextSpanId = 1;
-  kj::Own<WorkerTracer> workerTracer;
+  kj::Own<WeakRef<BaseTracer>> weakTracer;
 };
 
 // IsolateLimitEnforcer that enforces no limits.
@@ -2217,9 +2233,9 @@ class Server::WorkerService final: public Service,
     }
 
     KJ_IF_SOME(w, workerTracer) {
-      w->setMakeUserRequestSpanFunc([&w = *w]() {
+      w->setMakeUserRequestSpanFunc([weakTracer = w->getWeakRef()]() mutable {
         return SpanParent(kj::refcounted<UserSpanObserver>(
-            kj::refcounted<SequentialSpanSubmitter>(kj::addRef(w))));
+            kj::refcounted<SequentialSpanSubmitter>(weakTracer->addRef())));
       });
     }
     kj::Own<RequestObserver> observer =
