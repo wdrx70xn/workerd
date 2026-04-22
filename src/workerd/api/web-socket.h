@@ -592,7 +592,10 @@ class WebSocket: public EventTarget {
   // Keep track of current hibernatable websockets auto-response status to avoid racing
   // between regular websocket messages, and auto-responses.
   struct AutoResponse {
-    kj::Promise<void> ongoingAutoResponse = kj::READY_NOW;
+    // Wrapped in IoOwn so that the promise (a KJ async object) is safely destroyed via the
+    // IoContext's delete queue rather than inline during GC, which would violate
+    // DISALLOW_KJ_IO_DESTRUCTORS_SCOPE.
+    kj::Maybe<IoOwn<kj::Promise<void>>> ongoingAutoResponse;
     workerd::util::Queue<kj::String> pendingAutoResponseDeque;
     size_t queuedAutoResponses = 0;
     bool isPumping = false;
