@@ -244,12 +244,14 @@ bool ReadableLockImpl<Controller>::lockReader(jsg::Lock& js, Controller& self, R
   auto prp = js.newPromiseAndResolver<void>();
   prp.promise.markAsHandled(js);
 
-  auto lock = ReaderLocked(reader, kj::mv(prp.resolver));
+  auto lock = ReaderLocked(reader, kj::mv(prp.resolver), reader.addRef());
 
   if (self.state.template is<StreamStates::Closed>()) {
     maybeResolvePromise(js, lock.getClosedFulfiller());
+    lock.releaseReaderRef();
   } else KJ_IF_SOME(errored, self.state.template tryGetUnsafe<StreamStates::Errored>()) {
     maybeRejectPromise<void>(js, lock.getClosedFulfiller(), errored.getHandle(js));
+    lock.releaseReaderRef();
   }
 
   state.template transitionTo<ReaderLocked>(kj::mv(lock));
@@ -328,6 +330,7 @@ void ReadableLockImpl<Controller>::onClose(jsg::Lock& js) {
       // point is not recoverable. Log and move on.
       LOG_NOSENTRY(ERROR, "Error resolving ReadableStream reader closed promise");
     };
+    locked.releaseReaderRef();
   } else {
     (void)state.template transitionFromTo<PipeLocked, Unlocked>();
   }
@@ -345,6 +348,7 @@ void ReadableLockImpl<Controller>::onError(jsg::Lock& js, v8::Local<v8::Value> r
       // point is not recoverable. Log and move on.
       LOG_NOSENTRY(ERROR, "Error rejecting ReadableStream reader closed promise");
     }
+    locked.releaseReaderRef();
   } else {
     (void)state.template transitionFromTo<PipeLocked, Unlocked>();
   }

@@ -838,6 +838,7 @@ void ReadableStreamInternalController::doClose(jsg::Lock& js) {
   state.transitionTo<StreamStates::Closed>();
   KJ_IF_SOME(locked, readState.tryGetUnsafe<ReaderLocked>()) {
     maybeResolvePromise(js, locked.getClosedFulfiller());
+    locked.releaseReaderRef();
   } else {
     (void)readState.transitionFromTo<PipeLocked, Unlocked>();
   }
@@ -850,6 +851,7 @@ void ReadableStreamInternalController::doError(jsg::Lock& js, v8::Local<v8::Valu
   state.transitionTo<StreamStates::Errored>(js.v8Ref(reason));
   KJ_IF_SOME(locked, readState.tryGetUnsafe<ReaderLocked>()) {
     maybeRejectPromise<void>(js, locked.getClosedFulfiller(), reason);
+    locked.releaseReaderRef();
   } else {
     (void)readState.transitionFromTo<PipeLocked, Unlocked>();
   }
@@ -952,15 +954,17 @@ bool ReadableStreamInternalController::lockReader(jsg::Lock& js, Reader& reader)
   auto prp = js.newPromiseAndResolver<void>();
   prp.promise.markAsHandled(js);
 
-  auto lock = ReaderLocked(
-      reader, kj::mv(prp.resolver), IoContext::current().addObject(kj::heap<kj::Canceler>()));
+  auto lock = ReaderLocked(reader, kj::mv(prp.resolver), reader.addRef(),
+      IoContext::current().addObject(kj::heap<kj::Canceler>()));
 
   KJ_SWITCH_ONEOF(state) {
     KJ_CASE_ONEOF(closed, StreamStates::Closed) {
       maybeResolvePromise(js, lock.getClosedFulfiller());
+      lock.releaseReaderRef();
     }
     KJ_CASE_ONEOF(errored, StreamStates::Errored) {
       maybeRejectPromise<void>(js, lock.getClosedFulfiller(), errored.getHandle(js));
+      lock.releaseReaderRef();
     }
     KJ_CASE_ONEOF(readable, Readable) {
       // Nothing to do.

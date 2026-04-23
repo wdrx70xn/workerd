@@ -134,6 +134,10 @@ public:
 
   inline bool isByteOriented() const override { return false; }
 
+  kj::Maybe<kj::Own<void>> addRef() override {
+    return kj::Own<void>(kj::addRef(*this));
+  }
+
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
     tracker.trackField("impl", impl);
   }
@@ -209,6 +213,10 @@ public:
   void lockToStream(jsg::Lock& js, ReadableStream& stream);
 
   inline bool isByteOriented() const override { return true; }
+
+  kj::Maybe<kj::Own<void>> addRef() override {
+    return kj::Own<void>(kj::addRef(*this));
+  }
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
     tracker.trackField("impl", impl);

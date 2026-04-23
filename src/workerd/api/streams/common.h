@@ -388,6 +388,14 @@ class ReadableStreamController {
     // When a Reader lock is released, the controller will signal to the reader that it has been
     // detached.
     virtual void detach() = 0;
+
+    // Returns a ref-counted reference to this Reader, keeping it alive independently of
+    // its JS wrapper. Used by ReaderLocked to prevent premature GC of the reader while
+    // the stream still needs it. Returns kj::none for non-ref-counted readers (e.g.,
+    // DrainingReader).
+    virtual kj::Maybe<kj::Own<void>> addRef() {
+      return kj::none;
+    }
   };
 
   struct ByobOptions {
@@ -810,21 +818,34 @@ class ReaderLocked {
   static constexpr kj::StringPtr NAME KJ_UNUSED = "reader-locked"_kj;
   ReaderLocked(ReadableStreamController::Reader& reader,
       jsg::Promise<void>::Resolver closedFulfiller,
+      kj::Maybe<kj::Own<void>> readerRef = kj::none,
       kj::Maybe<IoOwn<kj::Canceler>> canceler = kj::none)
       : reader(reader),
         closedFulfiller(kj::mv(closedFulfiller)),
+        readerRef_(kj::mv(readerRef)),
         canceler(kj::mv(canceler)) {}
 
   ReaderLocked(ReaderLocked&&) = default;
   ~ReaderLocked() noexcept(false) {
-    KJ_IF_SOME(r, reader) {
-      r.detach();
-    }
+    // Note: we intentionally do NOT call reader.detach() here. In the normal flow, the
+    // controller settles the closedFulfiller via onClose()/onError() and the reader is
+    // detached explicitly via releaseReader(). If we get here with the reader still set,
+    // it means the stream is being torn down — calling detach() on a potentially-destroyed
+    // reader would be undefined behavior (the reader may already be mid-destruction if
+    // this is part of a GC cascade). The readerRef_ prevents premature destruction of
+    // JSG readers.
   }
   KJ_DISALLOW_COPY(ReaderLocked);
 
   void visitForGc(jsg::GcVisitor& visitor) {
     visitor.visit(closedFulfiller);
+    // Once the closedFulfiller has been settled (consumed by maybeResolvePromise or
+    // maybeRejectPromise, which set it to kj::none), the reader ref is no longer needed.
+    // Release it to break the ref cycle: ReaderLocked → Reader → Ref<ReadableStream> →
+    // controller → ReaderLocked.
+    if (closedFulfiller == kj::none) {
+      readerRef_ = kj::none;
+    }
   }
 
   ReadableStreamController::Reader& getReader() {
@@ -839,9 +860,17 @@ class ReaderLocked {
     return canceler;
   }
 
+  // Release the ref-counted reference to the Reader. Should be called when the
+  // closedFulfiller is settled to eagerly break the ref cycle. Also released
+  // automatically as a backup in visitForGc when the fulfiller has been consumed.
+  void releaseReaderRef() {
+    readerRef_ = kj::none;
+  }
+
   void clear() {
     reader = kj::none;
     closedFulfiller = kj::none;
+    readerRef_ = kj::none;
     canceler = kj::none;
   }
 
@@ -853,6 +882,11 @@ class ReaderLocked {
  private:
   kj::Maybe<ReadableStreamController::Reader&> reader;
   kj::Maybe<jsg::Promise<void>::Resolver> closedFulfiller;
+  // Ref-counted reference to the Reader. Keeps the Reader's C++ object alive
+  // independently of its JS wrapper, so that a reader created as a temporary (e.g.,
+  // `rs.getReader().closed.then(...)`) is not collected by GC before the stream has
+  // a chance to settle the closedFulfiller.
+  kj::Maybe<kj::Own<void>> readerRef_;
   kj::Maybe<IoOwn<kj::Canceler>> canceler;
 };
 
