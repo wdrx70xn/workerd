@@ -46,6 +46,7 @@ import { default as MetadataReader } from 'pyodide-internal:runtime-generated/me
 import { TRANSITIVE_REQUIREMENTS } from 'pyodide-internal:metadata';
 import { getTrustedReadFunc } from 'pyodide-internal:readOnlyFS';
 import { PyodideVersion } from 'pyodide-internal:const';
+import { createImportProxy } from 'pyodide-internal:serializeJsModule';
 
 /**
  * After running `instantiateEmscriptenModule` but before calling into any C
@@ -246,7 +247,8 @@ export function loadPyodide(
       SetupEmscripten.getModule()
     );
     Module.compileModuleFromReadOnlyFS = compileModuleFromReadOnlyFS;
-    Module.API.config.jsglobals = globalThis;
+    // Next line is not needed with Pyodide >= 0.29.0
+    Module.API.config.jsglobals = createImportProxy('global this', globalThis);
     if (isWorkerd) {
       Module.API.config.indexURL = indexURL;
       Module.API.config.resolveLockFilePromise!(lockfile);
