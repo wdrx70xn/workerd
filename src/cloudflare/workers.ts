@@ -16,7 +16,42 @@ export const RpcPromise = entrypoints.RpcPromise;
 export const RpcProperty = entrypoints.RpcProperty;
 export const RpcTarget = entrypoints.RpcTarget;
 export const ServiceStub = entrypoints.ServiceStub;
-export const WorkflowEntrypoint = entrypoints.WorkflowEntrypoint;
+
+
+type StepStub = { do: (...args: unknown[]) => Promise<unknown> };
+type StepCallback = (ctx: unknown, dedupName: string) => unknown;
+
+class WorkflowEntrypointImpl extends entrypoints.WorkflowEntrypoint {
+  // @ts-expect-error TS-private but callable via RPC; same convention as pipeline-transform.ts.
+  // eslint-disable-next-line no-restricted-syntax
+  private async _run_step(event: unknown, step: object): Promise<unknown> {
+    const tracedStep = new Proxy(step, {
+      get(target, prop, receiver): unknown {
+        if (prop !== 'do') {
+          return Reflect.get(target, prop, receiver);
+        }
+        const stub = target as StepStub;
+        return (name: unknown, ...rest: unknown[]): Promise<unknown> => {
+          // `step.do(name, config?, callback)`: callback is always the last argument.
+          const userCb = rest[rest.length - 1] as StepCallback;
+          rest[rest.length - 1] = (ctx: unknown, dedupName: string): unknown =>
+            innerTracing.enterSpan('workflow_step_do', (span) => {
+              span.setAttribute('cloudflare.workflow.step.name', String(name));
+              span.setAttribute('cloudflare.workflow.step.unique_name', dedupName);
+              return userCb(ctx, dedupName);
+            });
+          return stub.do(name, ...rest);
+        };
+      },
+    });
+
+    return (
+      this as unknown as { run: (e: unknown, s: unknown) => Promise<unknown> }
+    ).run(event, tracedStep);
+  }
+}
+
+export const WorkflowEntrypoint = WorkflowEntrypointImpl;
 
 export function withEnv(newEnv: unknown, fn: () => unknown): unknown {
   return innerEnv.withEnv(newEnv, fn);
