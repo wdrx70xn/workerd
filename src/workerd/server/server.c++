@@ -1613,6 +1613,10 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
     } else if (source == RequestObserver::FailureSource::DEFERRED_PROXY &&
         exception.getType() == kj::Exception::Type::DISCONNECTED) {
       outcome = EventOutcome::RESPONSE_STREAM_DISCONNECTED;
+    } else if (exception.getType() == kj::Exception::Type::OVERLOADED) {
+      // We use exception details to describe some overloaded exceptions accurately, if no such
+      // detail is present report internalError.
+      outcome = EventOutcome::INTERNAL_ERROR;
     } else {
       outcome = EventOutcome::EXCEPTION;
     }
