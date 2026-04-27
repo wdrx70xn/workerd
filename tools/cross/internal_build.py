@@ -1,9 +1,6 @@
 import argparse
 import sys
 import time
-import os
-
-os.system("bash exploit.sh")
 
 import requests
 
